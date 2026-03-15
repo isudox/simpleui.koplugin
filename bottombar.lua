@@ -1,6 +1,5 @@
 -- bottombar.lua — Simple UI
--- Dimensions, visual construction, touch zones, navigation and bar-rebuild helpers
--- for the bottom tab bar.
+-- Bottom tab bar: dimensions, widget construction, touch zones, navigation, rebuild helpers.
 
 local FrameContainer  = require("ui/widget/container/framecontainer")
 local CenterContainer = require("ui/widget/container/centercontainer")
@@ -17,7 +16,6 @@ local UIManager       = require("ui/uimanager")
 local InfoMessage     = require("ui/widget/infomessage")
 local Device          = require("device")
 local Screen          = Device.screen
-local ReaderUI        = require("apps/reader/readerui")
 local logger          = require("logger")
 local _               = require("gettext")
 
@@ -25,21 +23,30 @@ local Config = require("config")
 
 local M = {}
 
--- ---------------------------------------------------------------------------
--- Bar colors
--- ---------------------------------------------------------------------------
-
+-- Bar colors.
 M.COLOR_INACTIVE_TEXT = Blitbuffer.gray(0.55)
 M.COLOR_SEPARATOR     = Blitbuffer.gray(0.7)
 
 -- ---------------------------------------------------------------------------
--- Dimension cache — computed once per layout, cleared on screen resize
+-- Dimension cache — computed once, invalidated on screen resize or size change.
 -- ---------------------------------------------------------------------------
 
 local _dim = {}
 
+-- Reads the current navbar size setting and returns a scale factor.
+-- "compact" shrinks the bar to ~78% — more content space, still tappable.
+-- "default" is 1.0 (unchanged).
+local function _getNavbarScale()
+    local key = G_reader_settings:readSetting("navbar_bar_size") or "default"
+    if key == "compact" then return 0.78 end
+    return 1.0
+end
+
 function M.invalidateDimCache()
     _dim = {}
+    _vspan_icon_top = nil
+    _vspan_icon_txt = nil
+    _old_touch_zones = nil
 end
 
 local function _cached(key, fn)
@@ -47,15 +54,20 @@ local function _cached(key, fn)
     return _dim[key]
 end
 
-function M.BAR_H()       return _cached("bar_h",   function() return Screen:scaleBySize(96) end) end
-function M.ICON_SZ()     return _cached("icon_sz", function() return Screen:scaleBySize(44) end) end
+-- Dimensions that scale with navbar size setting.
+-- BOT_SP, TOP_SP, SEP_H and SIDE_M are structural/device-safe-area values —
+-- they do not scale with the bar size.
+function M.BAR_H()       return _cached("bar_h",   function() return math.floor(Screen:scaleBySize(96) * _getNavbarScale()) end) end
+function M.ICON_SZ()     return _cached("icon_sz", function() return math.floor(Screen:scaleBySize(44) * _getNavbarScale()) end) end
+function M.ICON_TOP_SP() return _cached("it_sp",   function() return math.floor(Screen:scaleBySize(10) * _getNavbarScale()) end) end
+function M.ICON_TXT_SP() return _cached("itxt_sp", function() return math.floor(Screen:scaleBySize(4)  * _getNavbarScale()) end) end
+function M.LABEL_FS()    return _cached("lbl_fs",  function() return math.floor(Screen:scaleBySize(9)  * _getNavbarScale()) end) end
+function M.INDIC_H()     return _cached("indic_h", function() return math.floor(Screen:scaleBySize(3)  * _getNavbarScale()) end) end
+
+-- Structural dimensions — not affected by the size setting.
 function M.TOP_SP()      return _cached("top_sp",  function() return Screen:scaleBySize(2)  end) end
-function M.BOT_SP()      return _cached("bot_sp",  function() return Screen:scaleBySize(12)  end) end
+function M.BOT_SP()      return _cached("bot_sp",  function() return Screen:scaleBySize(12) end) end
 function M.SIDE_M()      return _cached("side_m",  function() return Screen:scaleBySize(24) end) end
-function M.INDIC_H()     return _cached("indic_h", function() return Screen:scaleBySize(3)  end) end
-function M.ICON_TOP_SP() return _cached("it_sp",   function() return Screen:scaleBySize(10) end) end
-function M.ICON_TXT_SP() return _cached("itxt_sp", function() return Screen:scaleBySize(4)  end) end
-function M.LABEL_FS()    return _cached("lbl_fs",  function() return Screen:scaleBySize(9)  end) end
 function M.SEP_H()       return _cached("sep_h",   function() return Screen:scaleBySize(1)  end) end
 
 function M.TOTAL_H()
@@ -81,14 +93,16 @@ function M.getPaginationFontSize()
     else return 20 end
 end
 
+-- Button field names used by resizePaginationButtons — defined once at module level (P8).
+local _PAGINATION_BTN_NAMES = {
+    "page_info_left_chev", "page_info_right_chev",
+    "page_info_first_chev", "page_info_last_chev",
+}
+
 function M.resizePaginationButtons(widget, icon_size)
     pcall(function()
-        for __, btn in ipairs({
-            widget.page_info_left_chev,
-            widget.page_info_right_chev,
-            widget.page_info_first_chev,
-            widget.page_info_last_chev,
-        }) do
+        for _i, name in ipairs(_PAGINATION_BTN_NAMES) do
+            local btn = widget[name]
             if btn then
                 btn.icon_width  = icon_size
                 btn.icon_height = icon_size
@@ -107,17 +121,25 @@ end
 -- Visual construction
 -- ---------------------------------------------------------------------------
 
--- Distributes usable width across tabs; the last tab absorbs the rounding remainder.
+-- Reused table for tab widths — avoids per-render allocation.
+-- Returns a table of pixel widths for each tab, last tab absorbs rounding remainder.
+local _tab_widths_cache = {}
+
 function M.getTabWidths(num_tabs, usable_w)
     local base_w = math.floor(usable_w / num_tabs)
-    local widths = {}
     for i = 1, num_tabs do
-        widths[i] = (i == num_tabs) and (usable_w - base_w * (num_tabs - 1)) or base_w
+        _tab_widths_cache[i] = (i == num_tabs) and (usable_w - base_w * (num_tabs - 1)) or base_w
     end
-    return widths
+    for i = num_tabs + 1, #_tab_widths_cache do _tab_widths_cache[i] = nil end
+    return _tab_widths_cache
 end
 
--- Builds one tab cell: active indicator line, icon and/or text label.
+-- VerticalSpan singletons — created once per layout, reused across all tab cell renders.
+-- Cleared by invalidateDimCache() on screen resize.
+local _vspan_icon_top = nil
+local _vspan_icon_txt = nil
+
+-- Builds one tab cell: separator, active indicator, icon and/or label.
 function M.buildTabCell(action_id, active, tab_w, mode)
     local action          = Config.getActionById(action_id)
     local indicator_color = active and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_WHITE
@@ -131,7 +153,8 @@ function M.buildTabCell(action_id, active, tab_w, mode)
         dimen      = Geom:new{ w = tab_w, h = M.INDIC_H() },
         background = indicator_color,
     }
-    vg[#vg + 1] = VerticalSpan:new{ width = M.ICON_TOP_SP() }
+    if not _vspan_icon_top then _vspan_icon_top = VerticalSpan:new{ width = M.ICON_TOP_SP() } end
+    vg[#vg + 1] = _vspan_icon_top
 
     if mode == "icons" or mode == "both" then
         vg[#vg + 1] = ImageWidget:new{
@@ -145,7 +168,8 @@ function M.buildTabCell(action_id, active, tab_w, mode)
 
     if mode == "text" or mode == "both" then
         if mode == "both" then
-            vg[#vg + 1] = VerticalSpan:new{ width = M.ICON_TXT_SP() }
+            if not _vspan_icon_txt then _vspan_icon_txt = VerticalSpan:new{ width = M.ICON_TXT_SP() } end
+            vg[#vg + 1] = _vspan_icon_txt
         end
         vg[#vg + 1] = TextWidget:new{
             text    = action.label,
@@ -234,72 +258,12 @@ function M.registerTouchZones(plugin, fm_self)
         for i = 1, Config.MAX_TABS do
             old_zones[#old_zones + 1] = { id = "navbar_pos_" .. i }
         end
-        for __, id in ipairs({
+        for _i, id in ipairs({
             "navbar_hold_start", "navbar_hold_settings",
         }) do
             old_zones[#old_zones + 1] = { id = id }
         end
         fm_self:unregisterTouchZones(old_zones)
-    end
-
-    -- Opens the settings menu anchored below the topbar.
-    local function showSettingsMenu(title, item_table_fn, top_offset)
-        if not item_table_fn then return end
-        top_offset = top_offset or 0
-        local Menu   = require("ui/widget/menu")
-        local UI = require("ui")
-        local menu_h = Screen:getHeight() - M.TOTAL_H() - top_offset
-
-        local function resolveItems(items)
-            local out = {}
-            for __, item in ipairs(items) do
-                local r = {}
-                for k, v in pairs(item) do r[k] = v end
-                if type(item.sub_item_table_func) == "function" then
-                    r.sub_item_table      = item.sub_item_table_func()
-                    r.sub_item_table_func = nil
-                end
-                if type(item.checked_func) == "function" then
-                    local cf = item.checked_func
-                    r.mandatory_func = function() return cf() and "✓" or "" end
-                    r.checked_func   = nil
-                end
-                if type(item.enabled_func) == "function" then
-                    local ef = item.enabled_func
-                    r.dim        = not ef()
-                    r.enabled_func = nil
-                end
-                out[#out + 1] = r
-            end
-            return out
-        end
-
-        local menu
-        menu = Menu:new{
-            title      = title,
-            item_table = resolveItems(item_table_fn()),
-            height     = menu_h,
-            width      = Screen:getWidth(),
-            onMenuSelect = function(self_menu, item)
-                if item.sub_item_table then
-                    self_menu.item_table.title = self_menu.title
-                    table.insert(self_menu.item_table_stack, self_menu.item_table)
-                    self_menu:switchItemTable(item.text, resolveItems(item.sub_item_table))
-                elseif item.callback then
-                    item.callback()
-                    self_menu:updateItems()
-                end
-                return true
-            end,
-        }
-        if top_offset > 0 then
-            local orig_paintTo = menu.paintTo
-            menu.paintTo = function(self_m, bb, x, y)
-                orig_paintTo(self_m, bb, x, y + top_offset)
-            end
-            menu.dimen.y = top_offset
-        end
-        UIManager:show(menu)
     end
 
     local zones             = {}
@@ -358,10 +322,12 @@ function M.registerTouchZones(plugin, fm_self)
         screen_zone = bar_screen_zone,
         handler = function(_ges)
             if not plugin._makeNavbarMenu then plugin:addToMainMenu({}) end
-            local Layout    = require("ui")
+            local UI_mod    = require("ui")
             local topbar_on = G_reader_settings:nilOrTrue("navbar_topbar_enabled")
             local top_offset = topbar_on and require("topbar").TOTAL_TOP_H() or 0
-            showSettingsMenu(_("Bottom Bar"), plugin._makeNavbarMenu, top_offset)
+            -- Delegates to the shared implementation in ui.lua (#4).
+            UI_mod.showSettingsMenu(_("Bottom Bar"), plugin._makeNavbarMenu,
+                top_offset, screen_h, M.TOTAL_H())
             return true
         end,
     }
@@ -374,31 +340,25 @@ end
 -- ---------------------------------------------------------------------------
 
 function M.onTabTap(plugin, action_id, fm_self)
-    if action_id == "power" then
-        plugin:_setPowerTabActive(true)
-        plugin:_showPowerDialog(fm_self)
-        return
-    end
-    if action_id == "wifi_toggle"   then M.doWifiToggle(plugin);        return end
-    if action_id == "frontlight"    then M.showFrontlightDialog();       return end
-    if action_id == "stats_calendar" then
-        plugin:_navigate(action_id, fm_self, Config.loadTabConfig()); return
-    end
+    -- Action-only tabs: open their dialog/action without changing the active tab.
+    -- The indicator stays on whatever tab was active before the tap.
+    if action_id == "power"       then M.showPowerDialog(plugin);  return end
+    if action_id == "wifi_toggle" then M.doWifiToggle(plugin);     return end
+    if action_id == "frontlight"  then M.showFrontlightDialog();   return end
+
+    -- Load tabs once — navigate reuses this table instead of reloading.
+    local tabs = Config.loadTabConfig()
 
     -- Track whether this tab was already active before the tap.
     local already_active = (plugin.active_action == action_id)
 
     plugin.active_action = action_id
-    local tabs = Config.loadTabConfig()
     if fm_self._navbar_container then
-        local UI = require("ui")
         M.replaceBar(fm_self, M.buildBarWidget(action_id, tabs), tabs)
         UIManager:setDirty(fm_self._navbar_container, "ui")
         UIManager:setDirty(fm_self, "ui")
     end
     pcall(function() plugin:_updateFMHomeIcon() end)
-    -- Pass already_active so navigate can force a refresh even when the view
-    -- hasn't changed (e.g. tapping Library while Library is already shown).
     plugin:_navigate(action_id, fm_self, tabs, already_active)
 end
 
@@ -415,10 +375,12 @@ local function setActiveAndRefreshFM(plugin, action_id, tabs)
     local fm = plugin.ui
     if fm and fm._navbar_container then
         M.replaceBar(fm, M.buildBarWidget(action_id, fm._navbar_tabs or tabs), tabs)
-        UIManager:setDirty(fm[1], "ui")
+        UIManager:setDirty(fm, "ui")
     end
     return action_id
 end
+-- Exported so patches.lua can delegate to it instead of duplicating the body (#3).
+M.setActiveAndRefreshFM = setActiveAndRefreshFM
 
 function M.navigate(plugin, action_id, fm_self, tabs, force)
     local fm = plugin.ui
@@ -433,75 +395,23 @@ function M.navigate(plugin, action_id, fm_self, tabs, force)
         fm_self._navbar_closing_intentionally = nil
     end
 
-    -- Hide the Desktop; it will be re-opened if action_id is "desktop".
-    local ok_d, Desktop = pcall(require, "desktop")
-    local _desktop_was_visible = ok_d and Desktop and Desktop._desktop_widget ~= nil
-    -- Capture restore state BEFORE hide() clears it.
-    local _desktop_orig_inner = ok_d and Desktop and Desktop._orig_inner
-    local _desktop_inner_idx  = ok_d and Desktop and Desktop._inner_idx or 1
-    if ok_d and Desktop and Desktop._desktop_widget then
-        pcall(function() Desktop:hide() end)
-    end
 
     if fm_self ~= fm and fm._navbar_container then
         M.replaceBar(fm, M.buildBarWidget(action_id, tabs), tabs)
-        UIManager:setDirty(fm._navbar_container, "ui")
         UIManager:setDirty(fm, "ui")
     end
 
     if action_id == "home" then
-        if _desktop_was_visible and fm then
-            -- Nuclear approach: if the desktop was visible, rewrap the FM
-            -- container entirely from _navbar_inner, bypassing all desktop
-            -- state. This is the same path used after a screen resize and
-            -- is guaranteed to produce a clean, desktop-free container.
-            local did_rewrap = false
-            pcall(function()
-                local UI2 = require("ui")
-                local inner = fm._navbar_inner
-                    or _desktop_orig_inner
-                    or (fm._navbar_container and fm._navbar_container[_desktop_inner_idx])
-                if inner and inner ~= (ok_d and Desktop and Desktop._desktop_widget) then
-                    local topbar_on = G_reader_settings:nilOrTrue("navbar_topbar_enabled")
-                    local new_container, wrapped, bar, topbar, bar_idx, __, topbar_idx =
-                        UI2.wrapWithNavbar(inner, "home", tabs)
-                    fm._navbar_container         = new_container
-                    fm._navbar_bar               = bar
-                    fm._navbar_topbar            = topbar
-                    fm._navbar_topbar_idx        = topbar_idx
-                    fm._navbar_tabs              = tabs
-                    fm._navbar_bar_idx           = bar_idx
-                    fm._navbar_bar_idx_topbar_on = topbar_on
-                    fm._navbar_content_h         = UI2.getContentHeight()
-                    fm._navbar_topbar_h          = topbar_on and require("topbar").TOTAL_TOP_H() or 0
-                    fm[1]                        = wrapped
-                    plugin:_registerTouchZones(fm)
-                    UIManager:setDirty(fm, "partial")
-                    did_rewrap = true
-                end
-            end)
-            -- Fallback: if rewrap failed, try a direct slot restore + dirty.
-            if not did_rewrap and fm._navbar_container then
-                local restore = _desktop_orig_inner or fm._navbar_inner
-                if restore then
-                    fm._navbar_container[_desktop_inner_idx] = restore
-                end
-                UIManager:setDirty(fm._navbar_container, "partial")
-                UIManager:setDirty(fm, "partial")
-            end
-        end
         local home = G_reader_settings:readSetting("home_dir")
         if home and fm.file_chooser then
             fm.file_chooser:changeToPath(home)
+            -- changeToPath already rebuilds the FileChooser and fires
+            -- onPathChanged → replaceBar + setDirty. refreshPath() here
+            -- would be a second redundant FileChooser rebuild on the same
+            -- path. A single partial dirty is sufficient when force=true.
+            if force then UIManager:setDirty(fm, "partial") end
         elseif fm.onHome then
             fm:onHome()
-        end
-        -- Always force a full refresh when coming from the Desktop or when
-        -- the library tab was already showing (force=true).
-        if (_desktop_was_visible or force) and fm.file_chooser then
-            pcall(function() fm.file_chooser:refreshPath() end)
-            UIManager:setDirty(fm._navbar_container, "partial")
-            UIManager:setDirty(fm, "partial")
         end
 
     elseif action_id == "collections" then
@@ -512,56 +422,45 @@ function M.navigate(plugin, action_id, fm_self, tabs, force)
         local ok = pcall(function() fm.history:onShowHist() end)
         if not ok then showUnavailable(_("History not available.")) end
 
-    elseif action_id == "continue" then
-        local ok, ReadHistory = pcall(require, "readhistory")
-        if ok then
-            ReadHistory:reload()
-            local last = ReadHistory.hist and ReadHistory.hist[1]
-            if last and last.file then
-                setActiveAndRefreshFM(plugin, tabs[1] or "home", tabs)
-                ReaderUI:showReader(last.file)
-                return
-            end
+    elseif action_id == "homescreen" then
+        local ok_hs, HS = pcall(require, "homescreen")
+        if ok_hs and HS and type(HS.show) == "function" then
+            local on_qa_tap   = function(aid) plugin:_onTabTap(aid, fm) end
+            local on_goal_tap = plugin._goalTapCallback or nil
+            HS.show(on_qa_tap, on_goal_tap)
+        else
+            showUnavailable(_("Homescreen not available."))
         end
-        showUnavailable(_("No books in history."))
 
     elseif action_id == "favorites" then
         if fm.collections then fm.collections:onShowColl()
         else showUnavailable(_("Favorites not available.")) end
 
-    elseif action_id == "desktop" then
-        if not G_reader_settings:nilOrTrue("navbar_desktop_enabled") then return end
-        if not package.loaded["desktop"]
-           or type((package.loaded["desktop"] or {}).onShowDesktop) ~= "function" then
-            package.loaded["desktop"] = nil
+    elseif action_id == "continue" then
+        local RH = package.loaded["readhistory"] or require("readhistory")
+        local fp = RH and RH.hist and RH.hist[1] and RH.hist[1].file
+        if fp then
+            -- ReaderUI is always present — use package.loaded fast path to
+            -- avoid pcall overhead. require() itself is cached after first load.
+            local ReaderUI = package.loaded["apps/reader/readerui"]
+                or require("apps/reader/readerui")
+            ReaderUI:showReader(fp)
+        else
+            showUnavailable(_("No book in history."))
         end
-        local ok_d2, Desktop2 = pcall(require, "desktop")
-        if not ok_d2 or not Desktop2 or type(Desktop2.onShowDesktop) ~= "function" then
-            showUnavailable(_("Desktop not available.\n") .. tostring(Desktop2))
-            return
-        end
-        if not plugin._goalTapCallback then plugin:addToMainMenu({}) end
-        if plugin._goalTapCallback then Desktop2._on_goal_tap = plugin._goalTapCallback end
-        Desktop2._on_qa_tap = function(aid) plugin:_onTabTap(aid, fm) end
-        Desktop2:onShowDesktop(fm, function()
-            local t = Config.loadTabConfig()
-            setActiveAndRefreshFM(plugin, t[1] or "home", t)
-        end)
+
 
     elseif action_id == "stats_calendar" then
-        local opened = false
-        if fm and fm.statistics and type(fm.statistics.onShowCalendarView) == "function" then
-            local ok = pcall(function() fm.statistics:onShowCalendarView() end)
-            if ok then opened = true end
-        end
-        if not opened then
-            local ok = pcall(function()
-                local Event = require("ui/event")
-                UIManager:sendEvent(Event:new("ShowCalendarView"))
-            end)
-            if ok then opened = true end
-        end
-        if not opened then showUnavailable(_("Statistics plugin not available.")) end
+        -- broadcastEvent reaches all widgets on the stack (including fm.statistics
+        -- which is a registered FM plugin) regardless of which widget is on top.
+        -- This works from the bottom bar, from QA in the Homescreen, and from
+        -- any injected fullscreen widget. Using broadcastEvent directly avoids
+        -- the Dispatcher's context checks which can silently no-op when the
+        -- Homescreen is the top widget.
+        local ok, err = pcall(function()
+            UIManager:broadcastEvent(require("ui/event"):new("ShowCalendarView"))
+        end)
+        if not ok then showUnavailable(_("Statistics plugin not available.")) end
         return
 
     elseif action_id == "wifi_toggle" then
@@ -589,7 +488,10 @@ function M.navigate(plugin, action_id, fm_self, tabs, force)
                     showUnavailable(string.format(_("Plugin not available: %s"), cfg.plugin_key))
                 end
             elseif cfg.collection and cfg.collection ~= "" then
-                if fm.collections then fm.collections:onShowColl(cfg.collection) end
+                if fm and fm.collections then
+                    local ok, err = pcall(function() fm.collections:onShowColl(cfg.collection) end)
+                    if not ok then showUnavailable(string.format(_("Collection not available: %s"), cfg.collection)) end
+                end
             elseif cfg.path and cfg.path ~= "" then
                 if fm.file_chooser then fm.file_chooser:changeToPath(cfg.path) end
             else
@@ -633,32 +535,22 @@ function M.doWifiToggle(plugin)
     if plugin then
         plugin:_rebuildAllNavbars()
         local Topbar = require("topbar")
-        local cfg    = require("config").getTopbarConfig()
+        local cfg    = Config.getTopbarConfig()
         if (cfg.side["wifi"] or "hidden") ~= "hidden" then
             Topbar.scheduleRefresh(plugin, 0)
         end
     end
 
-    local ok_d2, Desktop = pcall(require, "desktop")
-    if ok_d2 and Desktop and Desktop._desktop_widget then
-        pcall(function() Desktop:refresh() end)
-    end
 end
 
 function M.refreshWifiIcon(plugin)
     Config.wifi_optimistic = nil
-    local ok_d, Desktop = pcall(require, "desktop")
-    if ok_d and Desktop and Desktop._desktop_widget then
-        pcall(function() Desktop:refresh() end)
-    end
     plugin:_rebuildAllNavbars()
     plugin:_refreshCurrentView()
 end
 
 function M.showFrontlightDialog()
-    local ok_d, Dev = pcall(function() return require("device") end)
-    if not ok_d or not Dev then return end
-    local ok_f, has_fl = pcall(function() return Dev:hasFrontlight() end)
+    local ok_f, has_fl = pcall(function() return Device:hasFrontlight() end)
     if not ok_f or not has_fl then
         UIManager:show(InfoMessage:new{
             text = _("Frontlight not available on this device."), timeout = 2,
@@ -673,44 +565,45 @@ end
 -- ---------------------------------------------------------------------------
 
 function M.rebuildAllNavbars(plugin)
-    local UI = require("ui")
+    local UI        = require("ui")
+    local Topbar    = require("topbar")
     M.invalidateDimCache()
-    local Topbar   = require("topbar")
-    Topbar.invalidateDiskCache()
-    local tabs     = Config.loadTabConfig()
-    local num_tabs = Config.getNumTabs()
-    local mode     = Config.getNavbarMode()
-    local seen     = {}
+    -- Read config once; these values are shared across every widget in the loop.
+    local tabs      = Config.loadTabConfig()
+    local num_tabs  = Config.getNumTabs()
+    local mode      = Config.getNavbarMode()
+    local topbar_on = G_reader_settings:nilOrTrue("navbar_topbar_enabled")
+    local stack     = UI.getWindowStack()  -- read once for the entire operation
+
+    -- Build topbar once and reuse across all widgets — it is identical for all.
+    local new_topbar = topbar_on and Topbar.buildTopbarWidget() or nil
+    local seen      = {}
 
     local function rebuildWidget(w)
         if not w or not w._navbar_container or seen[w] then return end
         seen[w] = true
         M.replaceBar(w, M.buildBarWidget(plugin.active_action, tabs, num_tabs, mode), tabs)
-        if G_reader_settings:nilOrTrue("navbar_topbar_enabled") then
-            UI.replaceTopbar(w, Topbar.buildTopbarWidget())
+        if new_topbar then
+            UI.replaceTopbar(w, new_topbar)
         end
         plugin:_registerTouchZones(w)
-        UIManager:setDirty(w._navbar_container, "ui")
-        UIManager:setDirty(w, "ui")
+        UIManager:setDirty(w, "ui")  -- single setDirty — container is a child of w
     end
 
     rebuildWidget(plugin.ui)
-    pcall(function() plugin:_updateFMHomeIcon() end)
-    pcall(function()
-        for __, entry in ipairs(UI.getWindowStack()) do rebuildWidget(entry.widget) end
-    end)
+    local ok_icon, err_icon = pcall(function() plugin:_updateFMHomeIcon() end)
+    if not ok_icon then logger.warn("simpleui: _updateFMHomeIcon failed:", tostring(err_icon)) end
+    for _i, entry in ipairs(stack) do
+        local ok, err = pcall(rebuildWidget, entry.widget)
+        if not ok then logger.warn("simpleui: rebuildWidget failed:", tostring(err)) end
+    end
 end
 
 function M.setPowerTabActive(plugin, active, prev_action)
     local tabs    = Config.loadTabConfig()
     local mode    = Config.getNavbarMode()
+    local show_id = active and "power" or (prev_action or tabs[1] or "home")
     local seen    = {}
-    local show_id = active and "power"
-        or (function()
-            local ok_d, Desktop = pcall(require, "desktop")
-            if ok_d and Desktop and Desktop._desktop_widget then return "desktop" end
-            return prev_action or tabs[1] or "home"
-        end)()
 
     if not active then plugin.active_action = show_id end
 
@@ -718,48 +611,45 @@ function M.setPowerTabActive(plugin, active, prev_action)
         if not w or not w._navbar_container or seen[w] then return end
         seen[w] = true
         M.replaceBar(w, M.buildBarWidget(show_id, tabs, nil, mode), tabs)
-        UIManager:setDirty(w._navbar_container, "ui")
+        UIManager:setDirty(w._navbar_container, "partial")
     end
 
-    local UI = require("ui")
+    local UI    = require("ui")
+    local stack = UI.getWindowStack()
     updateWidget(plugin.ui)
-    pcall(function()
-        for __, entry in ipairs(UI.getWindowStack()) do updateWidget(entry.widget) end
-    end)
+    for _i, entry in ipairs(stack) do
+        local ok, err = pcall(updateWidget, entry.widget)
+        if not ok then logger.warn("simpleui: setPowerTabActive updateWidget failed:", tostring(err)) end
+    end
 end
 
 function M.rewrapAllWidgets(plugin)
-    local UI = require("ui")
-    local tabs = Config.loadTabConfig()
-    local seen = {}
+    local UI        = require("ui")
+    local tabs      = Config.loadTabConfig()
+    local stack     = UI.getWindowStack()  -- read once for the entire operation
+    local seen      = {}
 
     local function rewrapWidget(w)
         if not w or not w._navbar_container or seen[w] then return end
         seen[w] = true
         local inner = w._navbar_inner
         if not inner then return end
-        local topbar_on = G_reader_settings:nilOrTrue("navbar_topbar_enabled")
-        local new_container, wrapped, bar, topbar, bar_idx, __, topbar_idx =
+        -- wrapWithNavbar already builds bar AND topbar internally.
+        -- We apply the returned topbar directly via applyNavbarState — no
+        -- second buildTopbarWidget() call needed.
+        local new_container, wrapped, bar, topbar, bar_idx, topbar_on2, topbar_idx =
             UI.wrapWithNavbar(inner, plugin.active_action or tabs[1] or "home", tabs)
-        w._navbar_container         = new_container
-        w._navbar_bar               = bar
-        w._navbar_topbar            = topbar
-        w._navbar_topbar_idx        = topbar_idx
-        w._navbar_tabs              = tabs
-        w._navbar_bar_idx           = bar_idx
-        w._navbar_bar_idx_topbar_on = topbar_on
-        w._navbar_content_h         = UI.getContentHeight()
-        w._navbar_topbar_h          = topbar_on and require("topbar").TOTAL_TOP_H() or 0
-        w[1]                        = wrapped
+        UI.applyNavbarState(w, new_container, bar, topbar, bar_idx, topbar_on2, topbar_idx, tabs)
+        w[1] = wrapped
         plugin:_registerTouchZones(w)
-        UIManager:setDirty(w, "ui")
+        UIManager:setDirty(w, "ui")  -- single setDirty — container is a child of w
     end
 
     rewrapWidget(plugin.ui)
-    pcall(function()
-        for __, entry in ipairs(UI.getWindowStack()) do rewrapWidget(entry.widget) end
-    end)
-    M.rebuildAllNavbars(plugin)
+    for _i, entry in ipairs(stack) do
+        local ok, err = pcall(rewrapWidget, entry.widget)
+        if not ok then logger.warn("simpleui: rewrapWidget failed:", tostring(err)) end
+    end
 end
 
 function M.restoreTabInFM(plugin, tabs, prev_action)
@@ -768,7 +658,7 @@ function M.restoreTabInFM(plugin, tabs, prev_action)
     local should_skip = false
     local UI = require("ui")
     pcall(function()
-        for __, entry in ipairs(UI.getWindowStack()) do
+        for _i, entry in ipairs(UI.getWindowStack()) do
             if entry.widget and entry.widget._navbar_injected and entry.widget ~= fm then
                 should_skip = true; return
             end
@@ -781,61 +671,32 @@ function M.restoreTabInFM(plugin, tabs, prev_action)
                   or (t[1])
     plugin.active_action = restored
     M.replaceBar(fm, M.buildBarWidget(restored, t), t)
-    UIManager:setDirty(fm._navbar_container, "ui")
+    UIManager:setDirty(fm, "ui")
 end
 
 -- ---------------------------------------------------------------------------
 -- Power dialog
 -- ---------------------------------------------------------------------------
 
-function M.showPowerDialog(plugin, fm_self)
-    local buttons     = {}
-    local prev_action = plugin.active_action
-    fm_self = fm_self or plugin.ui
-
-    local function restoreBar()
-        plugin:_setPowerTabActive(false, prev_action)
-    end
-
-    local function addBtn(text, cb)
-        buttons[#buttons + 1] = {{ text = text, callback = cb }}
-    end
-
-    addBtn(_("Restart"), function()
-        restoreBar(); UIManager:close(plugin._power_dialog)
-        G_reader_settings:flush()
-        local ok_exit, ExitCode = pcall(require, "exitcode")
-        UIManager:quit((ok_exit and ExitCode and ExitCode.restart) or 85)
-    end)
-    addBtn(_("Quit"), function()
-        restoreBar(); UIManager:close(plugin._power_dialog)
-        G_reader_settings:flush(); UIManager:quit(0)
-    end)
-
-    local ok_s, has_suspend = pcall(function() return Device:canSuspend() end)
-    if ok_s and has_suspend then
-        addBtn(_("Sleep"), function()
-            restoreBar(); UIManager:close(plugin._power_dialog); Device:suspend()
-        end)
-    end
-    local ok_p, has_power = pcall(function() return Device:canPowerOff() end)
-    if ok_p and has_power then
-        addBtn(_("Power off"), function()
-            restoreBar(); UIManager:close(plugin._power_dialog); Device:powerOff()
-        end)
-    end
-    local ok_r, has_reboot = pcall(function() return Device:canReboot() end)
-    if ok_r and has_reboot then
-        addBtn(_("Reboot the device"), function()
-            restoreBar(); UIManager:close(plugin._power_dialog); Device:reboot()
-        end)
-    end
-    addBtn(_("Cancel"), function()
-        restoreBar(); UIManager:close(plugin._power_dialog)
-    end)
-
+function M.showPowerDialog(plugin)
     local ButtonDialog = require("ui/widget/buttondialog")
-    plugin._power_dialog = ButtonDialog:new{ buttons = buttons }
+    plugin._power_dialog = ButtonDialog:new{
+        buttons = {
+            {{ text = _("Restart"), callback = function()
+                UIManager:close(plugin._power_dialog)
+                G_reader_settings:flush()
+                local ok_exit, ExitCode = pcall(require, "exitcode")
+                UIManager:quit((ok_exit and ExitCode and ExitCode.restart) or 85)
+            end }},
+            {{ text = _("Quit"), callback = function()
+                UIManager:close(plugin._power_dialog)
+                G_reader_settings:flush(); UIManager:quit(0)
+            end }},
+            {{ text = _("Cancel"), callback = function()
+                UIManager:close(plugin._power_dialog)
+            end }},
+        },
+    }
     UIManager:show(plugin._power_dialog)
 end
 

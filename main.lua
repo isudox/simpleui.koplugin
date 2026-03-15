@@ -42,13 +42,21 @@ local SimpleUIPlugin = WidgetContainer:new{
 
 function SimpleUIPlugin:init()
     local ok, err = pcall(function()
+        Config.applyFirstRunDefaults()
         Config.migrateOldCustomSlots()
+        Config.sanitizeQASlots()  -- remove orphaned custom QA ids from all slots
         self.ui.menu:registerToMainMenu(self)
         if G_reader_settings:nilOrTrue("simpleui_enabled") then
             Patches.installAll(self)
             if G_reader_settings:nilOrTrue("navbar_topbar_enabled") then
                 Topbar.scheduleRefresh(self, 0)
             end
+            -- Pre-load desktop modules during boot idle time so the first
+            -- Homescreen open has no perceptible freeze. scheduleIn(2) runs
+            -- after the FileManager UI is fully painted and stable.
+            UIManager:scheduleIn(2, function()
+                pcall(require, "desktop_modules/moduleregistry")
+            end)
         end
     end)
     if not ok then logger.err("simpleui: init failed:", tostring(err)) end
@@ -93,6 +101,16 @@ function SimpleUIPlugin:onResume()
     if G_reader_settings:nilOrTrue("navbar_topbar_enabled") then
         Topbar.scheduleRefresh(self, 0)
     end
+    -- Only invalidate caches if we are returning from an active reading session.
+    -- package.loaded["apps/reader/readerui"] is present while the reader is open;
+    -- once it has closed, RUI.instance is nil. (#8)
+    local RUI = package.loaded["apps/reader/readerui"]
+    if RUI and not RUI.instance then
+        local ok_rg, RG = pcall(require, "readinggoals")
+        if ok_rg and RG and RG.Stats then RG.Stats.invalidateCache() end
+        -- Config.clearCoverCache() is NOT called here — covers don't change
+        -- between reading sessions, only progress data does.
+    end
 end
 
 function SimpleUIPlugin:onFrontlightStateChanged()
@@ -107,15 +125,7 @@ end
 function SimpleUIPlugin:_registerTouchZones(fm_self)
     Bottombar.registerTouchZones(self, fm_self)
     Topbar.registerTouchZones(self, fm_self)
-    -- If Desktop is visible, re-register its zones so they take priority over bar zones.
-    local ok_d, Desktop = pcall(require, "desktop")
-    if ok_d and Desktop and Desktop._registered_zones
-            and fm_self and fm_self.registerTouchZones then
-        if fm_self.unregisterTouchZones then
-            fm_self:unregisterTouchZones(Desktop._registered_zones)
-        end
-        fm_self:registerTouchZones(Desktop._registered_zones)
-    end
+
 end
 
 function SimpleUIPlugin:_scheduleTopbarRefresh(delay)
@@ -185,18 +195,6 @@ function SimpleUIPlugin:_scheduleRebuild()
     end)
 end
 
-function SimpleUIPlugin:_rebuildDesktop()
-    local ok_d, Desktop = pcall(require, "desktop")
-    if not ok_d or not Desktop or not Desktop._desktop_widget then return end
-    local fm       = self._fm or self.ui
-    if not fm then return end
-    local close_fn = Desktop._close_fn
-    Desktop:hide()
-    Desktop:show(fm, close_fn)
-    self:_registerTouchZones(fm)
-    UIManager:setDirty(fm._navbar_container, "ui")
-    UIManager:setDirty(fm, "ui")
-end
 
 function SimpleUIPlugin:_updateFMHomeIcon() end
 
@@ -211,12 +209,17 @@ function SimpleUIPlugin:addToMainMenu(menu_items)
         menu_module_loaded = true
         local ok, err = pcall(function() require("menu")(SimpleUIPlugin) end)
         if not ok then
+            menu_module_loaded = false  -- allow retry on next call
             logger.err("simpleui: menu.lua failed to load: " .. tostring(err))
-            menu_items.navbar = { text = "Simple UI", sub_item_table = {} }
+            menu_items.simpleui = { sorting_hint = "tools", text = "Simple UI", sub_item_table = {} }
             return
         end
+        -- menu.lua replaced SimpleUIPlugin.addToMainMenu. Call it directly
+        -- via rawget so we bypass this wrapper and avoid infinite recursion.
+        local real_fn = rawget(SimpleUIPlugin, "addToMainMenu")
+        if real_fn then real_fn(self, menu_items) end
+        return
     end
-    SimpleUIPlugin.addToMainMenu(self, menu_items)
 end
 
 return SimpleUIPlugin

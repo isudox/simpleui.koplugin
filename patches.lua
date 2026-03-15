@@ -1,13 +1,12 @@
 -- patches.lua — Simple UI
 -- All monkey-patches applied to KOReader on plugin load:
---   FileManager.setupLayout  (navbar injection + desktop auto-open)
+--   FileManager.setupLayout  (navbar injection + homescreen auto-open)
 --   FileChooser.init         (corrected height)
---   FileManagerMenu          (Start with Desktop option)
 --   BookList.new             (corrected height)
 --   Menu.new + FMColl        (collections with corrected height)
 --   SortWidget.new + PathChooser.new (fullscreen widgets)
 --   UIManager.show           (universal navbar injection)
---   UIManager.close          (tab restore + desktop on close)
+--   UIManager.close          (tab restore + homescreen on close)
 --   Menu.init                (hide pagination bar)
 
 local UIManager  = require("ui/uimanager")
@@ -21,18 +20,16 @@ local Bottombar = require("bottombar")
 
 local M = {}
 
+-- Reusable empty table for UIManager.show varargs when no extra args are passed (#9).
+local _EMPTY = {}
+
 -- ---------------------------------------------------------------------------
 -- Shared helpers used across multiple patches
 -- ---------------------------------------------------------------------------
 
+-- Delegates to Bottombar to avoid duplicating the same function here (#3).
 local function setActiveAndRefreshFM(plugin, action_id, tabs)
-    plugin.active_action = action_id
-    local fm = plugin.ui
-    if fm and fm._navbar_container then
-        Bottombar.replaceBar(fm, Bottombar.buildBarWidget(action_id, fm._navbar_tabs or tabs), tabs)
-        UIManager:setDirty(fm[1], "ui")
-    end
-    return action_id
+    return Bottombar.setActiveAndRefreshFM(plugin, action_id, tabs)
 end
 
 -- ---------------------------------------------------------------------------
@@ -66,7 +63,7 @@ function M.patchFileManagerClass(plugin)
         orig_setupLayout(fm_self)
 
         -- Replace the right title bar button icon.
-        local PLUS_ALT_ICON = "plugins/simpleui.koplugin/icons/plus_alt.svg"
+        local PLUS_ALT_ICON = Config.ICON.plus_alt
         local tb = fm_self.title_bar
         if tb and tb.right_button then
             local function setPlusAltIcon(btn)
@@ -90,7 +87,7 @@ function M.patchFileManagerClass(plugin)
         if tb and tb.left_button and tb.right_button then
             local rb = tb.right_button
             if rb.image then
-                rb.image.file = "resources/icons/mdlight/appbar.menu.svg"
+                rb.image.file = Config.ICON.ko_menu
                 rb.image:free(); rb.image:init()
             end
             rb.overlap_align  = nil
@@ -115,156 +112,67 @@ function M.patchFileManagerClass(plugin)
 
         local tabs = Config.loadTabConfig()
 
-        -- When the FileManager is rebuilt after closing the reader, the Desktop
-        -- widget has been destroyed by the teardown. Reset the session flag so
-        -- the auto-open logic below can re-inject the Desktop correctly.
-        local _desktop_was_visible = false
-        do
-            local ok_d, Desktop = pcall(require, "desktop")
-            if ok_d and Desktop then
-                if not Desktop._desktop_widget then
-                    -- FM teardown wiped the desktop widget → re-open from scratch
-                    Config.desktop_session_opened = false
-                elseif Desktop._fm == fm_self then
-                    -- reinit() on the same FM while Desktop is visible (e.g. SDL
-                    -- resize/rotate event): we must re-inject after wrapWithNavbar
-                    -- replaces fm_self[1] with a fresh wrapped widget.
-                    _desktop_was_visible = true
-                else
-                    -- Desktop._fm is a different (destroyed) FM — happens when the
-                    -- reader closes and KOReader builds a brand-new FileManager while
-                    -- the old one is gone. Force re-open from scratch.
-                    Config.desktop_session_opened = false
-                    Desktop._desktop_widget = nil
-                    Desktop._fm = nil
-                end
-            end
-        end
-
-        -- Pre-activate the Desktop tab so the initial bar renders correctly.
-        local _will_autoopen_desktop = (
-            not Config.desktop_session_opened
-            and G_reader_settings:readSetting("start_with", "filemanager") == "desktop_simpleui"
-            and G_reader_settings:nilOrTrue("navbar_desktop_enabled")
-            and Config.tabInTabs("desktop", tabs)
-        )
-        if _will_autoopen_desktop or _desktop_was_visible then plugin.active_action = "desktop" end
 
         local navbar_container, wrapped, bar, topbar, bar_idx, topbar_on2, topbar_idx =
             UI.wrapWithNavbar(inner_widget, plugin.active_action, tabs)
-        fm_self._navbar_bar               = bar
-        fm_self._navbar_topbar            = topbar
-        fm_self._navbar_topbar_idx        = topbar_idx
-        fm_self._navbar_tabs              = tabs
-        fm_self._navbar_container         = navbar_container
-        fm_self._navbar_bar_idx           = bar_idx
-        fm_self._navbar_bar_idx_topbar_on = topbar_on2
-        fm_self._navbar_content_h         = UI.getContentHeight()
-        fm_self._navbar_topbar_h          = topbar_on2 and require("topbar").TOTAL_TOP_H() or 0
-        fm_self[1]                        = wrapped
-
-        -- Auto-open Desktop: inject the widget synchronously now (so the first
-        -- paint already shows the Desktop), then register touch zones in onShow
-        -- once the FM is on the UIManager stack.
-        if _will_autoopen_desktop or _desktop_was_visible then
-            Config.desktop_session_opened = true
-            local ok_d, Desktop = pcall(require, "desktop")
-            if ok_d and Desktop then
-                local close_fn = function()
-                    local fm = fm_self
-                    pcall(function()
-                        Desktop:hide()
-                        plugin.active_action = plugin._navbar_default_action or "home"
-                        Bottombar.replaceBar(fm, Bottombar.buildBarWidget(plugin.active_action, tabs), tabs)
-                        UIManager:setDirty(fm._navbar_container, "ui")
-                    end)
-                end
-                if not plugin._goalTapCallback then plugin:addToMainMenu({}) end
-                if plugin._goalTapCallback then Desktop._on_goal_tap = plugin._goalTapCallback end
-                Desktop._on_qa_tap = function(action_id) plugin:_onTabTap(action_id, fm_self) end
-                -- _injectWidget is safe before UIManager:show — no touch zones yet.
-                local ok_inj, injected = pcall(function() return Desktop:_injectWidget(fm_self, close_fn) end)
-                logger.dbg("simpleui setupLayout: _injectWidget ok=" .. tostring(ok_inj) .. " result=" .. tostring(injected))
-                if _desktop_was_visible then
-                    -- reinit(): FM is already on the UIManager stack, so we can
-                    -- register touch zones immediately rather than waiting for onShow.
-                    -- Guard: setupLayout is called multiple times during FM boot;
-                    -- only register zones on the FIRST call to avoid stacking duplicates.
-                    if not fm_self._desktop_zones_registered then
-                        fm_self._desktop_zones_registered = true
-                        logger.dbg("simpleui setupLayout: reinit with desktop visible -> _registerZones now")
-                        if ok_inj and injected then
-                            pcall(function() Desktop:_registerZones(fm_self) end)
-                        end
-                    end
-                    fm_self._desktop_needs_zones = nil
-                else
-                    -- _registerZones needs the FM on the UIManager stack; done in onShow below.
-                    fm_self._desktop_needs_zones = (ok_inj and injected) and Desktop or nil
-                end
-            end
-        end
+        UI.applyNavbarState(fm_self, navbar_container, bar, topbar, bar_idx, topbar_on2, topbar_idx, tabs)
+        fm_self[1] = wrapped
 
         pcall(function() plugin:_updateFMHomeIcon() end)
 
-        -- onShow: complete Desktop setup (touch zones) if needed, then fix the bar.
+        -- Auto-open Homescreen on boot when "Start with Homescreen" is set.
+        -- Unlike Continue (which is injected into the FM synchronously), Homescreen
+        -- is a UIManager stack widget — it can only be shown after the FM is on
+        -- the stack, so we defer to onShow via a flag.
+        local _will_autoopen_homescreen = (
+            G_reader_settings:readSetting("start_with", "filemanager") == "homescreen_simpleui"
+            and Config.tabInTabs("homescreen", tabs)
+        )
+        if _will_autoopen_homescreen then
+            plugin.active_action = "homescreen"
+            fm_self._hs_autoopen_pending = true
+        end
+
+        -- onShow: fix the bar after FM is on the stack.
         local orig_onShow = fm_self.onShow
         fm_self.onShow = function(this)
             if orig_onShow then orig_onShow(this) end
             Bottombar.resizePaginationButtons(this.file_chooser or this, Bottombar.getPaginationIconSize())
-            UIManager:setDirty(this[1], "ui")
+            -- Note: orig_onShow already calls setDirty on the FM. We only need
+            -- to dirty the navbar_container if we replace the bar below.
 
-            local ok_d, Desktop = pcall(require, "desktop")
-
-            -- Complete Desktop setup: register touch zones now that FM is on the stack.
-            if this._desktop_needs_zones then
-                logger.dbg("simpleui onShow: _desktop_needs_zones → _registerZones")
-                logger.dbg("simpleui onShow: navbar_container[1] is desktop_widget=", tostring(this._navbar_container and this._navbar_container[1] == Desktop._desktop_widget))
-                local D = this._desktop_needs_zones
-                this._desktop_needs_zones = nil
-                pcall(function() D:_registerZones(this) end)
-                logger.dbg("simpleui onShow: after _registerZones, navbar_container[1] is desktop_widget=", tostring(this._navbar_container and this._navbar_container[1] == Desktop._desktop_widget))
-                -- Bar is already set to "desktop" from setupLayout — nothing to replace.
+            -- Auto-open Homescreen: deferred from setupLayout because the FM
+            -- must be on the UIManager stack before UIManager:show() can be called.
+            if this._hs_autoopen_pending then
+                this._hs_autoopen_pending = nil
+                UIManager:scheduleIn(0, function()
+                    local ok_hs, HS = pcall(require, "homescreen")
+                    if ok_hs and HS then
+                        local on_qa_tap = function(aid) plugin:_onTabTap(aid, this) end
+                        if not plugin._goalTapCallback then plugin:addToMainMenu({}) end
+                        HS.show(on_qa_tap, plugin._goalTapCallback)
+                    end
+                end)
                 return
             end
 
-            -- Re-register Desktop touch zones on FM reshow (e.g. returning from reader).
-            -- Skip if already registered via setupLayout (flag set there) to avoid
-            -- stacking duplicate zones on every onShow.
-            if ok_d and Desktop and Desktop._registered_zones and this.registerTouchZones
-            and not this._desktop_zones_registered then
-                this._desktop_zones_registered = true
-                if this.unregisterTouchZones then
-                    this:unregisterTouchZones(Desktop._registered_zones)
-                end
-                this:registerTouchZones(Desktop._registered_zones)
-            end
-
-            -- Set correct active tab:
-            -- If Desktop is visible → leave bar as-is (already shows "desktop" active).
-            -- Otherwise → activate "home".
-            local desktop_visible = ok_d and Desktop and Desktop._desktop_widget
-            logger.dbg("simpleui onShow: desktop_visible=" .. tostring(desktop_visible ~= nil) .. " session_opened=" .. tostring(Config.desktop_session_opened))
-            if desktop_visible and Config.desktop_session_opened then return end
             if this._navbar_container then
                 local t = Config.loadTabConfig()
                 plugin.active_action = "home"
                 Bottombar.replaceBar(this, Bottombar.buildBarWidget("home", t), t)
-                UIManager:setDirty(this._navbar_container, "ui")
+                UIManager:setDirty(this, "ui")
             end
         end
 
         plugin:_registerTouchZones(fm_self)
 
         fm_self.onPathChanged = function(this, new_path)
-            local ok_d, Desktop = pcall(require, "desktop")
-            if ok_d and Desktop and Desktop._desktop_widget then return end
             local t          = Config.loadTabConfig()
             local new_active = M._resolveTabForPath(new_path, t)
             plugin.active_action = new_active
             if this._navbar_container then
                 Bottombar.replaceBar(this, Bottombar.buildBarWidget(new_active, t), t)
-                UIManager:setDirty(this._navbar_container, "ui")
+                UIManager:setDirty(this, "ui")
             end
             pcall(function() plugin:_updateFMHomeIcon() end)
         end
@@ -277,7 +185,7 @@ function M._resolveTabForPath(path, tabs)
     path = path:gsub("/$", "")
     local home_dir = G_reader_settings:readSetting("home_dir")
     if home_dir then home_dir = home_dir:gsub("/$", "") end
-    for __, tab_id in ipairs(tabs) do
+    for _i, tab_id in ipairs(tabs) do
         if tab_id == "home" then
             if home_dir and path == home_dir then return "home" end
         elseif tab_id:match("^custom_qa_%d+$") then
@@ -298,28 +206,41 @@ end
 function M.patchStartWithMenu()
     local ok_fmm, FileManagerMenu = pcall(require, "apps/filemanager/filemanagermenu")
     if not (ok_fmm and FileManagerMenu) then return end
+    -- Guard: only patch once. Without this, every return from the reader
+    -- wraps getStartWithMenuTable again, inserting duplicate entries
+    -- each time the menu is opened.
+    if FileManagerMenu._simpleui_startwith_patched then return end
     local orig_fn = FileManagerMenu.getStartWithMenuTable
     if not orig_fn then return end
+    FileManagerMenu._simpleui_startwith_patched = true
+    FileManagerMenu._simpleui_startwith_orig    = orig_fn
     FileManagerMenu.getStartWithMenuTable = function(fmm_self)
         local result = orig_fn(fmm_self)
-        if not G_reader_settings:nilOrTrue("navbar_desktop_enabled") then return result end
         local sub = result.sub_item_table
         if type(sub) ~= "table" then return result end
-        table.insert(sub, #sub, {
-            text         = _("Desktop"),
-            checked_func = function()
-                return G_reader_settings:readSetting("start_with", "filemanager") == "desktop_simpleui"
-            end,
-            callback = function()
-                G_reader_settings:saveSetting("start_with", "desktop_simpleui")
-            end,
-            radio = true,
-        })
+        -- Guard: only patch once per open (defensive).
+        -- Guard against entries already being present (belt-and-suspenders).
+        local has_homescreen = false
+        for _i, item in ipairs(sub) do
+            if item.text == _("Home Screen") and item.radio then has_homescreen = true end
+        end
+        local insert_pos = math.max(1, #sub)
+        if not has_homescreen then
+            table.insert(sub, insert_pos, {
+                text         = _("Home Screen"),
+                checked_func = function()
+                    return G_reader_settings:readSetting("start_with", "filemanager") == "homescreen_simpleui"
+                end,
+                callback = function()
+                    G_reader_settings:saveSetting("start_with", "homescreen_simpleui")
+                end,
+                radio = true,
+            })
+        end
         local orig_text_func = result.text_func
         result.text_func = function()
-            if G_reader_settings:readSetting("start_with", "filemanager") == "desktop_simpleui" then
-                return _("Start with") .. ": " .. _("Desktop")
-            end
+            local sw = G_reader_settings:readSetting("start_with", "filemanager")
+            if sw == "homescreen_simpleui" then return _("Start with") .. ": " .. _("Home Screen") end
             return orig_text_func and orig_text_func() or _("Start with")
         end
         return result
@@ -386,7 +307,7 @@ function M.patchCollections(plugin)
     local ok_rc, RC = pcall(require, "readcollection")
     if ok_rc and RC then
         -- Removes a collection name from the SimpleUI selected list and
-        -- cover-override table, then refreshes the Desktop if visible.
+        -- cover-override table.
         local function _removeFromPool(name)
             local ok_cw, CW = pcall(require, "collectionswidget")
             if not (ok_cw and CW) then return end
@@ -407,7 +328,7 @@ function M.patchCollections(plugin)
         end
 
         -- Renames a collection entry in the SimpleUI selected list and
-        -- cover-override table, then refreshes the Desktop if visible.
+        -- cover-override table.
         local function _renameInPool(old_name, new_name)
             local ok_cw, CW = pcall(require, "collectionswidget")
             if not (ok_cw and CW) then return end
@@ -428,14 +349,6 @@ function M.patchCollections(plugin)
             end
         end
 
-        -- Schedules a Desktop refresh if it is currently visible.
-        local function _refreshDesktop()
-            local ok_d, Desktop = pcall(require, "desktop")
-            if ok_d and Desktop and Desktop._desktop_widget and Desktop._fm then
-                Desktop:refresh()
-            end
-        end
-
         -- Patch removeCollection (called when the user deletes a collection).
         if type(RC.removeCollection) == "function" then
             local orig_remove = RC.removeCollection
@@ -444,7 +357,10 @@ function M.patchCollections(plugin)
                 local result = orig_remove(rc_self, coll_name, ...)
                 pcall(function()
                     _removeFromPool(coll_name)
-                    _refreshDesktop()
+                    -- Remove this collection from all custom QA configs.
+                    Config.purgeQACollection(coll_name)
+                    Config.invalidateTabsCache()
+                    plugin:_scheduleRebuild()
                 end)
                 return result
             end
@@ -458,7 +374,9 @@ function M.patchCollections(plugin)
                 local result = orig_rename(rc_self, old_name, new_name, ...)
                 pcall(function()
                     _renameInPool(old_name, new_name)
-                    _refreshDesktop()
+                    -- Update collection references in all custom QA configs.
+                    Config.renameQACollection(old_name, new_name)
+                    plugin:_scheduleRebuild()
                 end)
                 return result
             end
@@ -494,8 +412,11 @@ function M.patchFullscreenWidgets(plugin)
                     return orig_tb_new(tb_class, tb_attrs, ...)
                 end
             end
-            local sw = orig_sw_new(class, attrs, ...)
-            if orig_tb_new then TitleBar.new = orig_tb_new end
+            -- L5: use pcall so TitleBar.new is restored even when orig_sw_new raises.
+            local ok_sw2, sw_or_err = pcall(orig_sw_new, class, attrs, ...)
+            if orig_tb_new then TitleBar.new = orig_tb_new end  -- always restored
+            if not ok_sw2 then error(sw_or_err, 2) end
+            local sw = sw_or_err
             if not attrs.covers_fullscreen then return sw end
             pcall(function()
                 local vfooter = sw[1] and sw[1][1] and sw[1][1][2] and sw[1][1][2][1]
@@ -541,21 +462,20 @@ function M.patchUIManagerShow(plugin)
     plugin._orig_uimanager_show = orig_show
     local _show_depth = 0
 
-    local INJECT_NAMES = { collections = true, history = true, coll_list = true }
+    local INJECT_NAMES = { collections = true, history = true, coll_list = true, homescreen = true }
 
     UIManager.show = function(um_self, widget, ...)
+        -- B5: capture varargs NOW, before the pcall closure, because Lua does not
+        -- propagate '...' into nested functions.
+        -- #9: only allocate a new table when there are actual extra arguments;
+        -- the vast majority of UIManager:show calls pass none, so we reuse _EMPTY.
+        local n_extra    = select("#", ...)
+        local extra_args = n_extra > 0 and { ... } or _EMPTY
         _show_depth = _show_depth + 1
 
-        -- Desktop: only activate the tab, do not inject a navbar.
-        if _show_depth == 1 and widget and widget.name == "desktop" then
-            local tabs = Config.loadTabConfig()
-            if Config.tabInTabs("desktop", tabs) then
-                setActiveAndRefreshFM(plugin, "desktop", tabs)
-            end
-            local result = orig_show(um_self, widget, ...)
-            _show_depth  = _show_depth - 1
-            return result
-        end
+        -- B5: wrap the entire body so _show_depth is ALWAYS decremented, even
+        -- when orig_show or any injection step raises an error.
+        local ok, result = pcall(function()
 
         local should_inject = _show_depth == 1
             and widget
@@ -567,9 +487,7 @@ function M.patchUIManagerShow(plugin)
             and (widget._navbar_height_reduced or (widget.name and INJECT_NAMES[widget.name]))
 
         if not should_inject then
-            local result = orig_show(um_self, widget, ...)
-            _show_depth  = _show_depth - 1
-            return result
+            return orig_show(um_self, widget, table.unpack(extra_args))
         end
 
         widget._navbar_injected = true
@@ -611,7 +529,7 @@ function M.patchUIManagerShow(plugin)
         local tabs          = Config.loadTabConfig()
         local action_before = plugin.active_action
         local tabs_set      = {}
-        for __, id in ipairs(tabs) do tabs_set[id] = true end
+        for _i, id in ipairs(tabs) do tabs_set[id] = true end
 
         local effective_action = nil
 
@@ -627,8 +545,8 @@ function M.patchUIManagerShow(plugin)
             end)
         elseif widget.name == "history" and tabs_set["history"] then
             effective_action = setActiveAndRefreshFM(plugin, "history", tabs)
-        elseif widget.name == "desktop" and tabs_set["desktop"] then
-            effective_action = setActiveAndRefreshFM(plugin, "desktop", tabs)
+        elseif widget.name == "homescreen" and tabs_set["homescreen"] then
+            effective_action = setActiveAndRefreshFM(plugin, "homescreen", tabs)
         elseif widget.name == "coll_list"
                or (widget.name == "collections" and not Config.isFavoritesWidget(widget)) then
             if tabs_set["collections"] then
@@ -641,16 +559,71 @@ function M.patchUIManagerShow(plugin)
 
         local navbar_container, wrapped, bar, topbar, bar_idx, topbar_on, topbar_idx =
             UI.wrapWithNavbar(widget._navbar_inner, display_action, tabs)
-        widget._navbar_container          = navbar_container
-        widget._navbar_bar                = bar
-        widget._navbar_topbar             = topbar
-        widget._navbar_topbar_idx         = topbar_idx
-        widget._navbar_tabs               = tabs
-        widget._navbar_bar_idx            = bar_idx
-        widget._navbar_bar_idx_topbar_on  = topbar_on
-        widget._navbar_prev_action        = action_before
-        widget[1]                         = wrapped
+        UI.applyNavbarState(widget, navbar_container, bar, topbar, bar_idx, topbar_on, topbar_idx, tabs)
+        widget._navbar_prev_action = action_before
+        widget[1]                  = wrapped
         plugin:_registerTouchZones(widget)
+
+        -- Register the same top-of-screen tap/swipe zones that the FileManager
+        -- uses to open the KOReader main menu (FileManagerMenu:initGesListener).
+        -- This makes the gesture work consistently on all injected fullscreen
+        -- pages (Collections, History, Homescreen, etc.) without requiring each
+        -- widget to implement it individually.
+        pcall(function()
+            if not widget.registerTouchZones then return end
+            local DTAP_ZONE_MENU     = G_defaults:readSetting("DTAP_ZONE_MENU")
+            local DTAP_ZONE_MENU_EXT = G_defaults:readSetting("DTAP_ZONE_MENU_EXT")
+            if not DTAP_ZONE_MENU or not DTAP_ZONE_MENU_EXT then return end
+            local fm = plugin.ui
+            widget:registerTouchZones({
+                {
+                    id          = "simpleui_menu_tap",
+                    ges         = "tap",
+                    screen_zone = {
+                        ratio_x = DTAP_ZONE_MENU.x, ratio_y = DTAP_ZONE_MENU.y,
+                        ratio_w = DTAP_ZONE_MENU.w, ratio_h = DTAP_ZONE_MENU.h,
+                    },
+                    handler = function(ges)
+                        if fm and fm.menu then return fm.menu:onTapShowMenu(ges) end
+                    end,
+                },
+                {
+                    id          = "simpleui_menu_ext_tap",
+                    ges         = "tap",
+                    screen_zone = {
+                        ratio_x = DTAP_ZONE_MENU_EXT.x, ratio_y = DTAP_ZONE_MENU_EXT.y,
+                        ratio_w = DTAP_ZONE_MENU_EXT.w, ratio_h = DTAP_ZONE_MENU_EXT.h,
+                    },
+                    overrides = { "simpleui_menu_tap" },
+                    handler = function(ges)
+                        if fm and fm.menu then return fm.menu:onTapShowMenu(ges) end
+                    end,
+                },
+                {
+                    id          = "simpleui_menu_swipe",
+                    ges         = "swipe",
+                    screen_zone = {
+                        ratio_x = DTAP_ZONE_MENU.x, ratio_y = DTAP_ZONE_MENU.y,
+                        ratio_w = DTAP_ZONE_MENU.w, ratio_h = DTAP_ZONE_MENU.h,
+                    },
+                    handler = function(ges)
+                        if fm and fm.menu then return fm.menu:onSwipeShowMenu(ges) end
+                    end,
+                },
+                {
+                    id          = "simpleui_menu_ext_swipe",
+                    ges         = "swipe",
+                    screen_zone = {
+                        ratio_x = DTAP_ZONE_MENU_EXT.x, ratio_y = DTAP_ZONE_MENU_EXT.y,
+                        ratio_w = DTAP_ZONE_MENU_EXT.w, ratio_h = DTAP_ZONE_MENU_EXT.h,
+                    },
+                    overrides = { "simpleui_menu_swipe" },
+                    handler = function(ges)
+                        if fm and fm.menu then return fm.menu:onSwipeShowMenu(ges) end
+                    end,
+                },
+            })
+        end)
 
         pcall(function()
             local rb = widget.return_button
@@ -659,13 +632,31 @@ function M.patchUIManagerShow(plugin)
 
         Bottombar.resizePaginationButtons(widget, Bottombar.getPaginationIconSize())
 
-        if widget.name == "desktop" and widget.onShow then
-            pcall(function() widget:onShow() end)
-        end
-
-        orig_show(um_self, widget, ...)
-        _show_depth = _show_depth - 1
+        orig_show(um_self, widget, table.unpack(extra_args))
         UIManager:setDirty(widget[1], "ui")
+
+        -- If a new fullscreen widget was just shown while Homescreen is open,
+        -- close Homescreen now (it's covered, so no visual flash) to free memory.
+        -- This must run for ALL covers_fullscreen widgets — including ReaderUI
+        -- which has no title_bar and therefore does not pass should_inject,
+        -- but still covers the homescreen completely.
+        end) -- end pcall wrapper (B5)
+        _show_depth = _show_depth - 1  -- always decremented
+        if not ok then
+            logger.warn("simpleui: UIManager.show patch error:", tostring(result))
+        end
+        if _show_depth == 0 and widget and widget.covers_fullscreen
+                and widget.name ~= "homescreen" then
+            local stack = UI.getWindowStack()
+            for _i, entry in ipairs(stack) do
+                local w = entry.widget
+                if w and w.name == "homescreen" then
+                    UIManager:close(w)
+                    break
+                end
+            end
+        end
+        return result
     end
 end
 
@@ -678,15 +669,24 @@ function M.patchUIManagerClose(plugin)
     plugin._orig_uimanager_close = orig_close
 
     UIManager.close = function(um_self, widget, ...)
+        -- Fast path: skip all SimpleUI logic for non-fullscreen widgets (InfoMessage,
+        -- dialogs, menus, etc.) — the vast majority of close() calls.
+        -- Tab-restore only applies to injected fullscreen widgets; the HS re-open
+        -- logic only applies to fullscreen widgets too.  Neither block runs for
+        -- anything else, so we can return immediately and avoid the readSetting call.
+        if not (widget and widget.covers_fullscreen) then
+            return orig_close(um_self, widget, ...)
+        end
+
         if widget and widget._navbar_injected
                 and not widget._navbar_closing_intentionally then
-            local start_with = G_reader_settings:readSetting("start_with", "filemanager")
-            if start_with ~= "desktop_simpleui" then
+            do -- restore tab on close
                 -- coll_list is opened on top of the collections widget, so
                 -- restoreTabInFM's should_skip would fire (another _navbar_injected
                 -- widget is still on the stack). Force a direct restore to home instead.
                 if widget.name == "coll_list" then
-                    local fm = plugin.ui
+                    local ok_fm2, FM2 = pcall(require, "apps/filemanager/filemanager")
+                    local fm = ok_fm2 and FM2 and FM2.instance
                     if fm and fm._navbar_container then
                         local t = Config.loadTabConfig()
                         -- Prefer the prev_action saved on the collections widget
@@ -694,7 +694,7 @@ function M.patchUIManagerClose(plugin)
                         -- what was active before the user entered collections).
                         local restored = nil
                         pcall(function()
-                            for __, entry in ipairs(UI.getWindowStack()) do
+                            for _i, entry in ipairs(UI.getWindowStack()) do
                                 local w = entry.widget
                                 if w and w ~= widget and w._navbar_injected
                                         and (w.name == "collections" or w.name == "coll_list") then
@@ -711,7 +711,7 @@ function M.patchUIManagerClose(plugin)
                         end
                         plugin.active_action = restored
                         Bottombar.replaceBar(fm, Bottombar.buildBarWidget(restored, t), t)
-                        UIManager:setDirty(fm._navbar_container, "ui")
+                        UIManager:setDirty(fm, "ui")
                     end
                 else
                     plugin:_restoreTabInFM(widget._navbar_tabs, widget._navbar_prev_action)
@@ -719,47 +719,91 @@ function M.patchUIManagerClose(plugin)
             end
         end
 
-        local ok_rui, ReaderUI = pcall(require, "apps/reader/readerui")
-        local closing_reader = ok_rui and ReaderUI and widget and widget == ReaderUI.instance
+        -- Use package.loaded to avoid pcall overhead — this runs on every
+        -- UIManager:close() call, including trivial ones (InfoMessage, etc.).
+        -- ReaderUI is only loaded when the reader has been opened at least once;
+        -- if not loaded, closing_reader is false and no work is done.
+        local ReaderUI = package.loaded["apps/reader/readerui"]
+        local closing_reader = ReaderUI and widget and widget == ReaderUI.instance
 
         local result = orig_close(um_self, widget, ...)
 
         if closing_reader then
             plugin:_scheduleTopbarRefresh(0)
-            Config.desktop_session_opened = false
         end
 
         local start_with = G_reader_settings:readSetting("start_with", "filemanager")
-        if start_with == "desktop_simpleui"
+        if start_with == "homescreen_simpleui"
                 and widget
                 and widget.covers_fullscreen
-                and widget ~= plugin.ui
-                and widget.name ~= "coll_list"   -- coll_list closes onto collections, not the FM
+                and widget.name ~= "filemanager"
+                and widget.name ~= "homescreen"
+                and widget.name ~= "coll_list"
                 and not widget._navbar_closing_intentionally then
-            local fm = plugin.ui
+            -- Re-open Homescreen after any fullscreen widget closes.
+            -- HS._instance is nil here because patchUIManagerShow closes the
+            -- homescreen synchronously when any covers_fullscreen widget opens
+            -- (including ReaderUI).
+            -- Use package.loaded: FileManager is always loaded when the plugin is active.
+            local FM2 = package.loaded["apps/filemanager/filemanager"]
+            local fm  = FM2 and FM2.instance
             local other_open = false
+            local has_modal  = false
+            -- Single pass over the stack: detect both a blocking fullscreen widget
+            -- AND any lingering modal (non-fullscreen) widget at once, instead of
+            -- two separate loops over the same table.
             pcall(function()
-                for __, entry in ipairs(UI.getWindowStack()) do
+                for _i, entry in ipairs(UI.getWindowStack()) do
                     local w = entry.widget
-                    if w and w ~= fm and w ~= widget and w.covers_fullscreen then
-                        other_open = true; return
+                    if w and w ~= fm and w ~= widget then
+                        if w.covers_fullscreen then
+                            other_open = true; return   -- no need to look further
+                        else
+                            has_modal = true
+                            -- keep iterating: a fullscreen widget further down
+                            -- would set other_open and abort the whole re-open.
+                        end
                     end
                 end
             end)
-            if not other_open and fm and fm._navbar_container then
-                local ok_d, Desktop = pcall(require, "desktop")
-                if ok_d and Desktop and not Desktop._desktop_widget then
-                    UIManager:scheduleIn(0, function()
-                        local tabs = Config.loadTabConfig()
-                        setActiveAndRefreshFM(plugin, "desktop", tabs)
-                        if not plugin._goalTapCallback then plugin:addToMainMenu({}) end
-                        if plugin._goalTapCallback then Desktop._on_goal_tap = plugin._goalTapCallback end
-                        Desktop._on_qa_tap = function(action_id) plugin:_onTabTap(action_id, fm) end
-                        Desktop:onShowDesktop(fm, function()
-                            local t = Config.loadTabConfig()
-                            setActiveAndRefreshFM(plugin, t[1] or "home", t)
-                        end)
+            if not other_open and fm then
+
+                local function _doShowHS()
+                    -- homescreen is always in package.loaded at this point (plugin active).
+                    -- Avoid pcall+require overhead on every reader/fullscreen close.
+                    local HS = package.loaded["homescreen"]
+                    if not HS or HS._instance then return end
+                    -- Close any non-fullscreen widgets that were open on top of
+                    -- the reader (ConfigDialog, touch menus, etc.) and are now
+                    -- orphaned. Without this they sit above the homescreen and
+                    -- intercept taps without being dismissable.
+                    pcall(function()
+                        local stack = UI.getWindowStack()
+                        local to_close = {}
+                        for _i, entry in ipairs(stack) do
+                            local w = entry.widget
+                            if w and w ~= fm and not w.covers_fullscreen then
+                                to_close[#to_close + 1] = w
+                            end
+                        end
+                        for _, w in ipairs(to_close) do
+                            UIManager:close(w)
+                        end
                     end)
+                    local tabs = Config.loadTabConfig()
+                    setActiveAndRefreshFM(plugin, "homescreen", tabs)
+                    if not plugin._goalTapCallback then plugin:addToMainMenu({}) end
+                    HS.show(
+                        function(aid) plugin:_onTabTap(aid, fm) end,
+                        plugin._goalTapCallback
+                    )
+                end
+
+                if has_modal then
+                    -- Defer: let KOReader finish closing modal widgets first.
+                    UIManager:scheduleIn(0, _doShowHS)
+                else
+                    _doShowHS()
                 end
             end
         end
@@ -852,14 +896,25 @@ function M.teardownAll(plugin)
         if plugin._orig_menu_new  then Menu.new  = plugin._orig_menu_new;  plugin._orig_menu_new  = nil end
         if plugin._orig_menu_init then Menu.init = plugin._orig_menu_init; plugin._orig_menu_init = nil end
     end
-    local ok_fc, FMColl = pcall(require, "apps/filemanager/filemanagercollection")
-    if ok_fc and FMColl and plugin._orig_fmcoll_show then
+    local ok_fc2, FMColl = pcall(require, "apps/filemanager/filemanagercollection")
+    if ok_fc2 and FMColl and plugin._orig_fmcoll_show then
         FMColl.onShowCollList = plugin._orig_fmcoll_show; plugin._orig_fmcoll_show = nil
     end
     local ok_rc, RC = pcall(require, "readcollection")
     if ok_rc and RC then
         if plugin._orig_rc_remove then RC.removeCollection = plugin._orig_rc_remove; plugin._orig_rc_remove = nil end
         if plugin._orig_rc_rename then RC.renameCollection = plugin._orig_rc_rename; plugin._orig_rc_rename = nil end
+    end
+    -- B4: restore SortWidget.new and PathChooser.new (were missing before).
+    local ok_sw, SortWidget = pcall(require, "ui/widget/sortwidget")
+    if ok_sw and SortWidget and plugin._orig_sortwidget_new then
+        SortWidget.new = plugin._orig_sortwidget_new
+        plugin._orig_sortwidget_new = nil
+    end
+    local ok_pch, PathChooser = pcall(require, "ui/widget/pathchooser")
+    if ok_pch and PathChooser and plugin._orig_pathchooser_new then
+        PathChooser.new = plugin._orig_pathchooser_new
+        plugin._orig_pathchooser_new = nil
     end
     local ok_fch, FileChooser = pcall(require, "ui/widget/filechooser")
     if ok_fch and FileChooser and plugin._orig_fc_init then
@@ -871,6 +926,17 @@ function M.teardownAll(plugin)
     if ok_fm and FileManager and plugin._orig_fm_setup then
         FileManager.setupLayout = plugin._orig_fm_setup; plugin._orig_fm_setup = nil
     end
+    local ok_fmm, FileManagerMenu = pcall(require, "apps/filemanager/filemanagermenu")
+    if ok_fmm and FileManagerMenu and FileManagerMenu._simpleui_startwith_patched then
+        FileManagerMenu.getStartWithMenuTable       = FileManagerMenu._simpleui_startwith_orig
+        FileManagerMenu._simpleui_startwith_orig    = nil
+        FileManagerMenu._simpleui_startwith_patched = nil
+    end
+    -- Reset all module-level mutable state so a re-enable starts clean (A2).
+    Config.reset()
+    -- Release all cached module references so a re-enable loads fresh copies.
+    local ok_reg, Registry = pcall(require, "desktop_modules/moduleregistry")
+    if ok_reg and Registry then Registry.invalidate() end
 end
 
 return M

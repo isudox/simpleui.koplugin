@@ -3,7 +3,7 @@
 return {
     name        = "simpleui",
     fullname    = "Simple UI",
-    description = [[A simple UI for KOReader with Desktop Widgets]],
-    version     = "1.0.0",
-    author      = "Franxster",
+    description = [[A simple UI for KOReader]],
+    version     = "1.0.2",
+    author      = "Doctor Hetfield",
 }
