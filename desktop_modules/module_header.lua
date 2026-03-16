@@ -5,6 +5,7 @@
 
 local Blitbuffer      = require("ffi/blitbuffer")
 local CenterContainer = require("ui/widget/container/centercontainer")
+local datetime        = require("datetime")
 local Device          = require("device")
 local Font            = require("ui/font")
 local FrameContainer  = require("ui/widget/container/framecontainer")
@@ -142,7 +143,7 @@ local function buildForMode(w, mode, pool, ctx)
         vg[#vg+1] = CenterContainer:new{
             dimen = Geom:new{ w = inner_w, h = CLOCK_DIMEN },
             TextWidget:new{
-                text = os.date("%H:%M"),
+                text = datetime.secondsToHour(os.time(), G_reader_settings:isTrue("twelve_hour_clock")),
                 face = Font:getFace("smallinfofont", CLOCK_FS),
                 bold = true,
             },
