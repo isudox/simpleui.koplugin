@@ -941,13 +941,13 @@ msgid "Invalid arrangement.\nKeep items between the Left and Right separators."
 msgstr "Disposition invalide.\nGardez les éléments entre les séparateurs Gauche et Droite."
 
 msgid "Fetching bookmarks\xe2\x80\xa6"
-msgstr "Récupération des signets…"
+msgstr "Récupération des signets\xe2\x80\xa6"
 
 msgid "Path chooser not available."
 msgstr "Sélecteur de chemin indisponible."
 
 msgid "e.g. Comics\xe2\x80\xa6"
-msgstr "ex. BD…"
+msgstr "ex. BD\xe2\x80\xa6"
 
 msgid "Top Margin  (%d%%)"
 msgstr "Marge supérieure  (%d%%)"
