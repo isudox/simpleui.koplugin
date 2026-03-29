@@ -953,7 +953,7 @@ msgid "e.g. Comics…"
 msgstr "例如：漫画…"
 
 msgid "%d days of reading"
-msgstr "%d 天阅读"
+msgstr "连续 %d 天"
 
 msgid "%d%%"
 msgstr "%d%%"
@@ -962,7 +962,7 @@ msgid "%s remaining"
 msgstr "剩余 %s"
 
 msgid "1 day of reading"
-msgstr "1 天阅读"
+msgstr "连续 1 天"
 
 msgid "April"
 msgstr "四月"
