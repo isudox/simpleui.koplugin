@@ -17,6 +17,10 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=2; plural=(n != 1);\n"
 
+#: sui_menu.lua:347
+msgid "General"
+msgstr "Geral"
+
 #: sui_menu.lua:320
 msgid "    Size"
 msgstr "    Tamanho"
@@ -296,7 +300,7 @@ msgid "Close"
 msgstr "Fechar"
 
 #: sui_quickactions.lua:312
-msgid "Codepoint out of valid Unicode range (0â10FFFF)."
+msgid "Codepoint out of valid Unicode range (0–10FFFF)."
 msgstr "Codepoint fora do intervalo Unicode válido (0–10FFFF)."
 
 #: sui_quickactions.lua:702
@@ -631,7 +635,7 @@ msgid "Invalid arrangement.\nKeep the Left, Center and Right separators in order
 msgstr "Disposição inválida.\nMantenha os separadores Esquerda, Centro e Direita em ordem."
 
 #: sui_quickactions.lua:318
-msgid "Invalid input. Please enter 1â6 hexadecimal digits (0â9, AâF)."
+msgid "Invalid input. Please enter 1–6 hexadecimal digits (0–9, A–F)."
 msgstr "Entrada inválida. Introduza 1–6 dígitos hexadecimais (0–9, A–F)."
 
 #: desktop_modules/module_currently.lua:671
@@ -772,6 +776,10 @@ msgid "Modules"
 msgstr "Módulos"
 
 #: sui_menu.lua:1271
+#: sui_menu.lua:1385
+msgid "Modules  (%d)"
+msgstr "Módulos  (%d)"
+
 msgid "Modules  (%d — no limit)"
 msgstr "Módulos  (%d — sem limite)"
 
@@ -906,6 +914,10 @@ msgstr "Número de Livros na Pasta"
 #: sui_menu.lua:1634
 msgid "Number of Pages"
 msgstr "Número de Páginas"
+
+#: sui_menu.lua:494
+msgid "Number of Pages in Title Bar Always"
+msgstr "Número de Páginas na Barra de Título Sempre"
 
 #: sui_quickactions.lua:286
 msgid "OK"
@@ -1494,6 +1506,10 @@ msgstr "dia de sequência"
 msgid "days streak"
 msgstr "dias de sequência"
 
+#: desktop_modules/module_reading_stats.lua:68
+msgid "no streak"
+msgstr "sem streak"
+
 #: sui_quickactions.lua:769
 msgid "default"
 msgstr "predefinido"
@@ -1596,3 +1612,60 @@ msgid "Stats layout"
 msgstr "Apresentação das estatísticas"
 
 
+
+#: sui_menu.lua:356
+msgid "Pagination bar set to Default.\n\nRestart now?"
+msgstr "Barra de paginação reposta para predefinição.\n\nReiniciar agora?"
+
+#: sui_menu.lua:367
+msgid "Navpager enabled.\n\nRestart now?"
+msgstr "Navpager ativado.\n\nReiniciar agora?"
+
+#: sui_menu.lua:377
+msgid "Pagination bar hidden.\n\nRestart now?"
+msgstr "Barra de paginação ocultada.\n\nReiniciar agora?"
+
+#: sui_menu.lua:387
+msgid "Dot Pager"
+msgstr "Paginação por pontos"
+
+#: sui_menu.lua:395
+msgid "Shows a row of dots at the bottom of the homescreen.\nThe active page dot is filled; the others are dimmed.\nAlways active when Navpager is selected."
+msgstr "Mostra uma fila de pontos no fundo do ecrã inicial.\nO ponto da página ativa está preenchido; os restantes estão esbatidos.\nSempre ativo quando o Navpager está selecionado."
+
+#: sui_menu.lua:417
+msgid "Uses the standard KOReader pagination bar on the homescreen.\nNot available when Navpager is active."
+msgstr "Usa a barra de paginação padrão do KOReader no ecrã inicial.\nNão disponível quando o Navpager está ativo."
+
+#: sui_menu.lua:438
+msgid "Hides the pagination bar on the homescreen.\nNot available when Navpager is active."
+msgstr "Oculta a barra de paginação no ecrã inicial.\nNão disponível quando o Navpager está ativo."
+
+#: sui_menu.lua:1566
+msgid "Modules per Page  (%d)"
+msgstr "Módulos por página  (%d)"
+
+#: sui_menu.lua:1572
+msgid "Modules per Page"
+msgstr "Módulos por página"
+
+#: sui_menu.lua:1573
+msgid "Maximum number of modules shown on each page.\nSwipe left/right on the Home Screen to turn pages."
+msgstr "Número máximo de módulos mostrados em cada página.\nDeslize para a esquerda/direita no ecrã inicial para mudar de página."
+
+#: sui_menu.lua:1834
+msgid "Placeholder cover for bookless folders"
+msgstr "Capa de substituição para pastas sem livros"
+
+#: sui_menu.lua:1849
+msgid "  Scan subfolders for cover"
+msgstr "  Procurar capa em subpastas"
+
+#: sui_homescreen.lua:407
+#: desktop_modules/module_quote.lua:950
+msgid "Open this file?"
+msgstr "Abrir este ficheiro?"
+
+#: sui_bottombar.lua:1638
+msgid "Sleep"
+msgstr "Suspender"

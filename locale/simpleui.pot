@@ -9,6 +9,10 @@ msgstr ""
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 
+#: sui_menu.lua:347
+msgid "General"
+msgstr ""
+
 #: sui_menu.lua:320
 msgid "    Size"
 msgstr ""
@@ -289,7 +293,7 @@ msgid "Close"
 msgstr ""
 
 #: sui_quickactions.lua:312
-msgid "Codepoint out of valid Unicode range (0â10FFFF)."
+msgid "Codepoint out of valid Unicode range (0–10FFFF)."
 msgstr ""
 
 #: sui_quickactions.lua:702
@@ -624,7 +628,7 @@ msgid "Invalid arrangement.\nKeep the Left, Center and Right separators in order
 msgstr ""
 
 #: sui_quickactions.lua:318
-msgid "Invalid input. Please enter 1â6 hexadecimal digits (0â9, AâF)."
+msgid "Invalid input. Please enter 1–6 hexadecimal digits (0–9, A–F)."
 msgstr ""
 
 #: desktop_modules/module_currently.lua:671
@@ -767,6 +771,10 @@ msgstr ""
 #: sui_menu.lua:1271
 msgid "Modules  (%d — no limit)"
 msgstr ""
+#: sui_menu.lua:1385
+msgid "Modules  (%d)"
+msgstr ""
+
 
 #: sui_menu.lua:1275
 msgid "Modules  (%d/%d — %d left)"
@@ -899,6 +907,10 @@ msgstr ""
 #: sui_menu.lua:1634
 msgid "Number of Pages"
 msgstr ""
+#: sui_menu.lua:494
+msgid "Number of Pages in Title Bar Always"
+msgstr ""
+
 
 #: sui_quickactions.lua:286
 msgid "OK"
@@ -1488,6 +1500,10 @@ msgstr ""
 msgid "days streak"
 msgstr ""
 
+#: desktop_modules/module_reading_stats.lua:68
+msgid "no streak"
+msgstr ""
+
 #: sui_quickactions.lua:769
 msgid "default"
 msgstr ""
@@ -1590,3 +1606,60 @@ msgid "Stats layout"
 msgstr ""
 
 
+
+#: sui_menu.lua:356
+msgid "Pagination bar set to Default.\n\nRestart now?"
+msgstr ""
+
+#: sui_menu.lua:367
+msgid "Navpager enabled.\n\nRestart now?"
+msgstr ""
+
+#: sui_menu.lua:377
+msgid "Pagination bar hidden.\n\nRestart now?"
+msgstr ""
+
+#: sui_menu.lua:387
+msgid "Dot Pager"
+msgstr ""
+
+#: sui_menu.lua:395
+msgid "Shows a row of dots at the bottom of the homescreen.\nThe active page dot is filled; the others are dimmed.\nAlways active when Navpager is selected."
+msgstr ""
+
+#: sui_menu.lua:417
+msgid "Uses the standard KOReader pagination bar on the homescreen.\nNot available when Navpager is active."
+msgstr ""
+
+#: sui_menu.lua:438
+msgid "Hides the pagination bar on the homescreen.\nNot available when Navpager is active."
+msgstr ""
+
+#: sui_menu.lua:1566
+msgid "Modules per Page  (%d)"
+msgstr ""
+
+#: sui_menu.lua:1572
+msgid "Modules per Page"
+msgstr ""
+
+#: sui_menu.lua:1573
+msgid "Maximum number of modules shown on each page.\nSwipe left/right on the Home Screen to turn pages."
+msgstr ""
+
+#: sui_menu.lua:1834
+msgid "Placeholder cover for bookless folders"
+msgstr ""
+
+#: sui_menu.lua:1849
+msgid "  Scan subfolders for cover"
+msgstr ""
+
+#: sui_homescreen.lua:407
+#: desktop_modules/module_quote.lua:950
+msgid "Open this file?"
+msgstr ""
+
+#: sui_bottombar.lua:1638
+msgid "Sleep"
+msgstr ""

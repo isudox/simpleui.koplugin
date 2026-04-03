@@ -30,6 +30,175 @@ local _qa_plugin_dir = debug.getinfo(1, "S").source:match("^@(.+/)[^/]+$") or ".
 QA.ICONS_DIR = _qa_plugin_dir .. "icons/custom"
 
 -- ---------------------------------------------------------------------------
+-- Custom Quick Actions persistence
+-- CRUD for custom QA entries: list management, per-entry config, key cache,
+-- collection purge/rename, slot sanitization, id generation.
+-- ---------------------------------------------------------------------------
+-- Key cache: avoids rebuilding "navbar_cqa_<id>" strings on every call.
+-- These keys are stable within a session (IDs never change after creation).
+local _qa_key_cache = {}
+local function getQASettingsKey(qa_id)
+    local k = _qa_key_cache[qa_id]
+    if not k then
+        k = "navbar_cqa_" .. qa_id
+        _qa_key_cache[qa_id] = k
+    end
+    return k
+end
+
+function QA.getCustomQAList()
+    return G_reader_settings:readSetting("navbar_custom_qa_list") or {}
+end
+
+function QA.saveCustomQAList(list)
+    G_reader_settings:saveSetting("navbar_custom_qa_list", list)
+end
+
+function QA.getCustomQAConfig(qa_id)
+    local cfg = G_reader_settings:readSetting(getQASettingsKey(qa_id)) or {}
+    return {
+        label             = cfg.label or qa_id,
+        path              = cfg.path,
+        collection        = cfg.collection,
+        plugin_key        = cfg.plugin_key,
+        plugin_method     = cfg.plugin_method,
+        dispatcher_action = cfg.dispatcher_action,
+        icon              = cfg.icon,
+    }
+end
+
+function QA.saveCustomQAConfig(qa_id, label, path, collection, icon, plugin_key, plugin_method, dispatcher_action)
+    G_reader_settings:saveSetting(getQASettingsKey(qa_id), {
+        label             = label,
+        path              = path,
+        collection        = collection,
+        plugin_key        = plugin_key,
+        plugin_method     = plugin_method,
+        dispatcher_action = dispatcher_action,
+        icon              = icon,
+    })
+end
+
+function QA.deleteCustomQA(qa_id)
+    G_reader_settings:delSetting(getQASettingsKey(qa_id))
+    _qa_key_cache[qa_id] = nil  -- remove from key cache
+    local list = QA.getCustomQAList()
+    local new_list = {}
+    for _i, id in ipairs(list) do
+        if id ~= qa_id then new_list[#new_list + 1] = id end
+    end
+    QA.saveCustomQAList(new_list)
+    -- Invalidate the module-level QA validity cache so the next render does
+    -- not show a deleted action.
+    local mqa = package.loaded["desktop_modules/module_quick_actions"]
+    if mqa and mqa.invalidateCustomQACache then mqa.invalidateCustomQACache() end
+    local tabs = G_reader_settings:readSetting("navbar_tabs")
+    if type(tabs) == "table" then
+        local new_tabs = {}
+        for _i, id in ipairs(tabs) do
+            if id ~= qa_id then new_tabs[#new_tabs + 1] = id end
+        end
+        G_reader_settings:saveSetting("navbar_tabs", new_tabs)
+    end
+    -- Remove from all page QA slots
+    for _i, pfx in ipairs({ "navbar_homescreen_quick_actions_" }) do
+        for slot = 1, 3 do
+            local key = pfx .. slot .. "_items"
+            local dqa = G_reader_settings:readSetting(key)
+            if type(dqa) == "table" then
+                local new_dqa = {}
+                for _i, id in ipairs(dqa) do
+                    if id ~= qa_id then new_dqa[#new_dqa + 1] = id end
+                end
+                G_reader_settings:saveSetting(key, new_dqa)
+            end
+        end
+    end
+end
+
+-- Removes all custom QA entries that reference a deleted collection name.
+-- Called by patches.lua when removeCollection fires.
+function QA.purgeQACollection(coll_name)
+    local list    = QA.getCustomQAList()
+    local changed = false
+    for _i, qa_id in ipairs(list) do
+        local cfg = QA.getCustomQAConfig(qa_id)
+        if cfg.collection == coll_name then
+            -- Wipe the collection field so the QA becomes unconfigured
+            -- (keeps the entry visible so the user knows to reconfigure).
+            QA.saveCustomQAConfig(qa_id, cfg.label, cfg.path, nil,
+                cfg.icon, cfg.plugin_key, cfg.plugin_method, cfg.dispatcher_action)
+            changed = true
+        end
+    end
+    return changed
+end
+
+-- Updates collection references in all custom QAs after a rename.
+function QA.renameQACollection(old_name, new_name)
+    local list    = QA.getCustomQAList()
+    local changed = false
+    for _i, qa_id in ipairs(list) do
+        local cfg = QA.getCustomQAConfig(qa_id)
+        if cfg.collection == old_name then
+            QA.saveCustomQAConfig(qa_id, cfg.label, cfg.path, new_name,
+                cfg.icon, cfg.plugin_key, cfg.plugin_method, cfg.dispatcher_action)
+            changed = true
+        end
+    end
+    return changed
+end
+
+-- Removes orphaned custom QA ids from all QA slots.
+-- An id is orphaned when it is referenced in a slot but not in the master list.
+-- Safe to call at startup and after any QA deletion.
+function QA.sanitizeQASlots()
+    local list = QA.getCustomQAList()
+    local valid = {}
+    for _i, id in ipairs(list) do valid[id] = true end
+    local changed = false
+    for _, pfx in ipairs({ "navbar_homescreen_quick_actions_" }) do
+        for slot = 1, 3 do
+            local key  = pfx .. slot .. "_items"
+            local items = G_reader_settings:readSetting(key)
+            if type(items) == "table" then
+                local clean = {}
+                for _i, id in ipairs(items) do
+                    -- Keep built-in action ids and valid custom QA ids
+                    if not id:match("^custom_qa_%d+$") or valid[id] then
+                        clean[#clean+1] = id
+                    else
+                        changed = true
+                    end
+                end
+                if changed then G_reader_settings:saveSetting(key, clean) end
+            end
+        end
+    end
+    if changed then
+        local mqa = package.loaded["desktop_modules/module_quick_actions"]
+        if mqa and mqa.invalidateCustomQACache then mqa.invalidateCustomQACache() end
+    end
+    return changed
+end
+
+function QA.nextCustomQAId()
+    local list  = QA.getCustomQAList()
+    local max_n = 0
+    for _i, id in ipairs(list) do
+        local n = tonumber(id:match("^custom_qa_(%d+)$"))
+        if n and n > max_n then max_n = n end
+    end
+    local n = max_n + 1
+    while G_reader_settings:readSetting("navbar_cqa_custom_qa_" .. n) do n = n + 1 end
+    return "custom_qa_" .. n
+end
+
+function QA.clearQAKeyCache()
+    for k in pairs(_qa_key_cache) do _qa_key_cache[k] = nil end
+end
+
+-- ---------------------------------------------------------------------------
 -- Default-action label / icon overrides
 -- Setting keys: navbar_action_<id>_label  /  navbar_action_<id>_icon
 -- These are the authoritative get/set functions; sui_config.lua delegates
@@ -304,13 +473,13 @@ local function _showNerdIconInput(current_icon, on_select, on_cancel)
                                     function() UIManager:nextTick(_openInputDlg) end)
                             else
                                 UIManager:show(InfoMessage:new{
-                                    text    = _("Codepoint out of valid Unicode range (0â10FFFF)."),
+                                    text    = _("Codepoint out of valid Unicode range (0–10FFFF)."),
                                     timeout = 3,
                                 })
                             end
                         else
                             UIManager:show(InfoMessage:new{
-                                text    = _("Invalid input. Please enter 1â6 hexadecimal digits (0â9, AâF)."),
+                                text    = _("Invalid input. Please enter 1–6 hexadecimal digits (0–9, A–F)."),
                                 timeout = 3,
                             })
                         end

@@ -237,165 +237,25 @@ end
 -- Custom Quick Actions
 -- ---------------------------------------------------------------------------
 
--- Key cache: avoids rebuilding "navbar_cqa_<id>" strings on every call.
--- These keys are stable within a session (IDs never change after creation).
-local _qa_key_cache = {}
-local function getQASettingsKey(qa_id)
-    local k = _qa_key_cache[qa_id]
-    if not k then
-        k = "navbar_cqa_" .. qa_id
-        _qa_key_cache[qa_id] = k
-    end
-    return k
+-- ---------------------------------------------------------------------------
+-- Custom Quick Actions persistence
+-- The authoritative implementations live in sui_quickactions to keep all QA
+-- logic in one place. These thin wrappers preserve the Config.* call sites
+-- in sui_menu.lua, sui_patches.lua, main.lua and migrateOldCustomSlots.
+-- ---------------------------------------------------------------------------
+local function _QA_lazy()
+    return package.loaded["sui_quickactions"] or require("sui_quickactions")
 end
-
-function M.getCustomQAList()
-    return G_reader_settings:readSetting("navbar_custom_qa_list") or {}
-end
-
-function M.saveCustomQAList(list)
-    G_reader_settings:saveSetting("navbar_custom_qa_list", list)
-end
-
-function M.getCustomQAConfig(qa_id)
-    local cfg = G_reader_settings:readSetting(getQASettingsKey(qa_id)) or {}
-    return {
-        label             = cfg.label or qa_id,
-        path              = cfg.path,
-        collection        = cfg.collection,
-        plugin_key        = cfg.plugin_key,
-        plugin_method     = cfg.plugin_method,
-        dispatcher_action = cfg.dispatcher_action,
-        icon              = cfg.icon,
-    }
-end
-
-function M.saveCustomQAConfig(qa_id, label, path, collection, icon, plugin_key, plugin_method, dispatcher_action)
-    G_reader_settings:saveSetting(getQASettingsKey(qa_id), {
-        label             = label,
-        path              = path,
-        collection        = collection,
-        plugin_key        = plugin_key,
-        plugin_method     = plugin_method,
-        dispatcher_action = dispatcher_action,
-        icon              = icon,
-    })
-end
-
-function M.deleteCustomQA(qa_id)
-    G_reader_settings:delSetting(getQASettingsKey(qa_id))
-    _qa_key_cache[qa_id] = nil  -- remove from key cache
-    local list = M.getCustomQAList()
-    local new_list = {}
-    for _i, id in ipairs(list) do
-        if id ~= qa_id then new_list[#new_list + 1] = id end
-    end
-    M.saveCustomQAList(new_list)
-    -- Invalidate the module-level QA validity cache so the next render does
-    -- not show a deleted action.
-    local mqa = package.loaded["desktop_modules/module_quick_actions"]
-    if mqa and mqa.invalidateCustomQACache then mqa.invalidateCustomQACache() end
-    local tabs = G_reader_settings:readSetting("navbar_tabs")
-    if type(tabs) == "table" then
-        local new_tabs = {}
-        for _i, id in ipairs(tabs) do
-            if id ~= qa_id then new_tabs[#new_tabs + 1] = id end
-        end
-        G_reader_settings:saveSetting("navbar_tabs", new_tabs)
-    end
-    -- Remove from all page QA slots
-    for _i, pfx in ipairs({ "navbar_homescreen_quick_actions_" }) do
-        for slot = 1, 3 do
-            local key = pfx .. slot .. "_items"
-            local dqa = G_reader_settings:readSetting(key)
-            if type(dqa) == "table" then
-                local new_dqa = {}
-                for _i, id in ipairs(dqa) do
-                    if id ~= qa_id then new_dqa[#new_dqa + 1] = id end
-                end
-                G_reader_settings:saveSetting(key, new_dqa)
-            end
-        end
-    end
-end
-
--- Removes all custom QA entries that reference a deleted collection name.
--- Called by patches.lua when removeCollection fires.
-function M.purgeQACollection(coll_name)
-    local list    = M.getCustomQAList()
-    local changed = false
-    for _i, qa_id in ipairs(list) do
-        local cfg = M.getCustomQAConfig(qa_id)
-        if cfg.collection == coll_name then
-            -- Wipe the collection field so the QA becomes unconfigured
-            -- (keeps the entry visible so the user knows to reconfigure).
-            M.saveCustomQAConfig(qa_id, cfg.label, cfg.path, nil,
-                cfg.icon, cfg.plugin_key, cfg.plugin_method, cfg.dispatcher_action)
-            changed = true
-        end
-    end
-    return changed
-end
-
--- Updates collection references in all custom QAs after a rename.
-function M.renameQACollection(old_name, new_name)
-    local list    = M.getCustomQAList()
-    local changed = false
-    for _i, qa_id in ipairs(list) do
-        local cfg = M.getCustomQAConfig(qa_id)
-        if cfg.collection == old_name then
-            M.saveCustomQAConfig(qa_id, cfg.label, cfg.path, new_name,
-                cfg.icon, cfg.plugin_key, cfg.plugin_method, cfg.dispatcher_action)
-            changed = true
-        end
-    end
-    return changed
-end
-
--- Removes orphaned custom QA ids from all QA slots.
--- An id is orphaned when it is referenced in a slot but not in the master list.
--- Safe to call at startup and after any QA deletion.
-function M.sanitizeQASlots()
-    local list = M.getCustomQAList()
-    local valid = {}
-    for _i, id in ipairs(list) do valid[id] = true end
-    local changed = false
-    for _, pfx in ipairs({ "navbar_homescreen_quick_actions_" }) do
-        for slot = 1, 3 do
-            local key  = pfx .. slot .. "_items"
-            local items = G_reader_settings:readSetting(key)
-            if type(items) == "table" then
-                local clean = {}
-                for _i, id in ipairs(items) do
-                    -- Keep built-in action ids and valid custom QA ids
-                    if not id:match("^custom_qa_%d+$") or valid[id] then
-                        clean[#clean+1] = id
-                    else
-                        changed = true
-                    end
-                end
-                if changed then G_reader_settings:saveSetting(key, clean) end
-            end
-        end
-    end
-    if changed then
-        local mqa = package.loaded["desktop_modules/module_quick_actions"]
-        if mqa and mqa.invalidateCustomQACache then mqa.invalidateCustomQACache() end
-    end
-    return changed
-end
-
-function M.nextCustomQAId()
-    local list  = M.getCustomQAList()
-    local max_n = 0
-    for _i, id in ipairs(list) do
-        local n = tonumber(id:match("^custom_qa_(%d+)$"))
-        if n and n > max_n then max_n = n end
-    end
-    local n = max_n + 1
-    while G_reader_settings:readSetting("navbar_cqa_custom_qa_" .. n) do n = n + 1 end
-    return "custom_qa_" .. n
-end
+function M.getCustomQAList()         return _QA_lazy().getCustomQAList()                                                              end
+function M.saveCustomQAList(list)    return _QA_lazy().saveCustomQAList(list)                                                         end
+function M.getCustomQAConfig(id)     return _QA_lazy().getCustomQAConfig(id)                                                          end
+function M.saveCustomQAConfig(id, label, path, coll, icon, pk, pm, da)
+                                     return _QA_lazy().saveCustomQAConfig(id, label, path, coll, icon, pk, pm, da)                    end
+function M.deleteCustomQA(id)        return _QA_lazy().deleteCustomQA(id)                                                             end
+function M.purgeQACollection(coll)   return _QA_lazy().purgeQACollection(coll)                                                        end
+function M.renameQACollection(o, n)  return _QA_lazy().renameQACollection(o, n)                                                       end
+function M.sanitizeQASlots()         return _QA_lazy().sanitizeQASlots()                                                              end
+function M.nextCustomQAId()          return _QA_lazy().nextCustomQAId()                                                               end
 
 -- ---------------------------------------------------------------------------
 -- Tab configuration
@@ -792,8 +652,8 @@ function M.reset()
     _BookInfoManager             = nil
     _topbar_cfg_menu_cache       = nil
     _ReadCollection              = nil
-    -- Clear QA key cache so re-enable starts clean
-    for k in pairs(_qa_key_cache) do _qa_key_cache[k] = nil end
+    -- QA key cache is now managed in sui_quickactions.lua
+    _QA_lazy().clearQAKeyCache()
     -- Release all cached cover bitmaps (OPT-D)
     M.clearCoverCache()
     -- _bim_cover_count and _RenderImage are reset inside clearCoverCache()
@@ -879,7 +739,23 @@ local function _scaleBBToSlot(bb, target_w, target_h)
     local src_w = bb:getWidth()
     local src_h = bb:getHeight()
     if src_w <= 0 or src_h <= 0 then return bb end
-    if src_w == target_w and src_h == target_h then return bb end
+    if src_w == target_w and src_h == target_h then
+        -- MUST copy: bb is typically owned by BookInfoManager. Returning it
+        -- directly means our LRU cache holds a reference to BIM's bitmap.
+        -- When clearCoverCache() frees cached entries, it would destroy BIM's
+        -- internal cover_bb — causing static/noise on the next getCoverBB call
+        -- because the BIM hands back the same (now-freed) FFI memory.
+        local ok_blit, Blitbuffer_mod = pcall(require, "ffi/blitbuffer")
+        if ok_blit and Blitbuffer_mod then
+            local ok_copy, copy_bb = pcall(function()
+                local c = Blitbuffer_mod.new(target_w, target_h, bb:getType())
+                c:blitFrom(bb, 0, 0, 0, 0, target_w, target_h)
+                return c
+            end)
+            if ok_copy and copy_bb then return copy_bb end
+        end
+        return bb  -- fallback if copy fails (rare)
+    end
     -- Use math.max so the image fills the slot completely (cover crop),
     -- rather than math.min which would letterbox/pillarbox with white bars.
     local scale_factor = math.max(target_w / src_w, target_h / src_h)
@@ -989,13 +865,26 @@ function M.getCoverBB(filepath, w, h)
 end
 
 -- Releases all cover bitmaps (owned by us — scaled copies).
+-- Defer the actual freeing of the bitmaps to a background timer to avoid
+-- blocking the UI thread on slower e-readers when closing the Homescreen.
 function M.clearCoverCache()
-    for _, entry in pairs(_bim_cover_cache) do
-        pcall(function() entry.bb:free() end)
-    end
+    if _bim_cover_count == 0 then return end
+    local to_free = _bim_cover_cache
     _bim_cover_cache = {}
     _bim_cover_count = 0
     _RenderImage     = nil
+    local UIManager = require("ui/uimanager")
+    -- Free one cover per tick to keep the UI smooth
+    local function freeNext()
+        local k, entry = next(to_free)
+        if not k then return end
+        pcall(function() entry.bb:free() end)
+        to_free[k] = nil
+        if next(to_free) then
+            UIManager:scheduleIn(0.1, freeNext)
+        end
+    end
+    UIManager:scheduleIn(0.1, freeNext)
 end
 
 -- ---------------------------------------------------------------------------
@@ -1051,6 +940,10 @@ function M.openStatsDB()
         local idx_ok = pcall(function()
             conn:exec("CREATE INDEX IF NOT EXISTS idx_simpleui_book_md5 ON book(md5);")
             conn:exec("CREATE INDEX IF NOT EXISTS idx_simpleui_pagestat_book ON page_stat(id_book);")
+            -- Covers the WHERE start_time >= ? filter in fetchTimeSeries (day_buckets CTE)
+            -- and the dated CTE in fetchStreak. Without this index both queries do a full
+            -- table scan of page_stat on every cold-cache render.
+            conn:exec("CREATE INDEX IF NOT EXISTS idx_simpleui_pagestat_time ON page_stat(start_time);")
         end)
         if idx_ok then _indexes_created = true end
     end
@@ -1116,6 +1009,13 @@ function M.isNavpagerEnabled()
     return G_reader_settings:isTrue("navbar_navpager_enabled")
 end
 
+-- Returns true when dot-pager mode is active on the homescreen.
+-- Dot-pager shows a row of dots (one per page) instead of the chevron bar,
+-- and obeys the same pagination visibility rules as the default bar.
+function M.isDotPagerEnabled()
+    return G_reader_settings:nilOrTrue("navbar_dotpager_always")
+end
+
 
 -- Returns the effective tab limit for the current mode.
 function M.effectiveMaxTabs()
@@ -1132,8 +1032,7 @@ end
 --      any fullscreen menu)
 --   2. The FM's file_chooser (always a Menu/BookList)
 --
--- Returns false, false when no pageable widget is found or when the widget
--- is the homescreen (which has no pagination).
+-- Returns false, false when no pageable widget is found (e.g. ReaderUI).
 -- Read prev/next state from a menu using page/page_num directly,
 -- exactly as KOReader's own pagination bar does in Menu:updatePageInfo().
 local function _stateFromMenu(menu)
@@ -1178,7 +1077,19 @@ function M.getNavpagerState()
                 end
             end
 
-            -- Case 3: fullscreen but not pageable (homescreen, ReaderUI, etc.).
+            -- Case 3: Homescreen — read _current_page / _total_pages from the instance.
+            local HS   = package.loaded["sui_homescreen"]
+            local inst = HS and HS._instance
+            if inst and inst == w then
+                local cur   = inst._current_page or 1
+                local total = inst._total_pages  or 1
+                local prev3 = cur > 1
+                local nxt3  = cur < total
+                logger.dbg("simpleui navpager: homescreen =>", tostring(prev3), tostring(nxt3))
+                return prev3, nxt3
+            end
+
+            -- Case 4: fullscreen but not pageable (ReaderUI, etc.).
             logger.dbg("simpleui navpager: not pageable -> false,false")
             return false, false
         end
@@ -1743,16 +1654,18 @@ end
 -- Setting key: "simpleui_hide_label_" .. mod_id  (true = hidden, nil = shown)
 -- Never stored as false — KOReader LuaSettings removes keys set to false.
 -- ---------------------------------------------------------------------------
+
 local function _labelHideKey(mod_id)
     return "simpleui_hide_label_" .. (mod_id or "")
 end
 
--- Returns true when the section label should be hidden.
+-- Returns true when the section label for mod_id should be hidden.
 function M.isLabelHidden(mod_id)
     return G_reader_settings:readSetting(_labelHideKey(mod_id)) == true
 end
 
--- Call at the start of build() to keep mod.label in sync with the setting.
+-- Call at the start of each module's build() to keep mod.label in sync.
+-- default_label is the translated string e.g. _("Currently Reading").
 function M.applyLabelToggle(mod, default_label)
     if M.isLabelHidden(mod.id) then
         mod.label = nil
@@ -1761,11 +1674,11 @@ function M.applyLabelToggle(mod, default_label)
     end
 end
 
--- Returns a checkbox menu item for toggling the section label.
+-- Returns a checkbox menu item for toggling the section label visibility.
 -- _lc is the menu-local gettext wrapper (ctx_menu._).
 function M.makeLabelToggleItem(mod_id, default_label, refresh, _lc)
     return {
-        text           = _lc("Show label"),
+        text           = _lc("Show section label"),
         checked_func   = function() return not M.isLabelHidden(mod_id) end,
         keep_menu_open = true,
         callback       = function()

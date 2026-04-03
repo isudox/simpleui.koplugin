@@ -67,12 +67,26 @@ local function _cached(key, fn)
     return _dim[key]
 end
 
+-- Topbar scale factor — cached inside _dim so getTopbarSizePct() (a readSetting
+-- call) is only paid once per invalidation cycle, regardless of how many
+-- dimension functions call _getTopbarScale(). Mirrors the same fix applied to
+-- _getNavbarScale() in sui_bottombar.lua.
 local function _getTopbarScale()
-    local Config = require("sui_config")
-    return Config.getTopbarSizePct() / 100
+    return _cached("topbar_scale", function()
+        return Config.getTopbarSizePct() / 100
+    end)
 end
 
-function M.SIDE_M()        return require("sui_core").SIDE_M()        end  -- delegação para ui.lua
+-- Lazy upvalue for sui_core — resolved on first use to avoid a circular
+-- require at load time, but stored so that M.SIDE_M() never pays a
+-- require() lookup after the first call.
+local _Core
+local function _getCore()
+    _Core = _Core or require("sui_core")
+    return _Core
+end
+
+function M.SIDE_M()        return _getCore().SIDE_M()                                           end
 function M.TOPBAR_SIDE_M() return _cached("topbar_side_m", function() return M.SIDE_M() - 3 end) end
 
 function M.TOPBAR_H()
@@ -524,11 +538,16 @@ function M.refresh(plugin)
     -- multiple _navbar_containers is unsafe: replaceTopbar mutates overlap_offset
     -- in-place, so the first paint would corrupt the offset seen by subsequent
     -- containers holding the same reference.
+    local new_topbar = M.buildTopbarWidget()
+    -- Re-check suspended state after buildTopbarWidget() — the device may have
+    -- suspended during that call. If so, discard the widget and do not setDirty
+    -- or reschedule: onResume will restart the chain cleanly.
+    if plugin and plugin._simpleui_suspended then return end
     local seen = {}
     local function refreshWidget(w)
         if not w or not w._navbar_container or seen[w] then return end
         seen[w] = true
-        UI.replaceTopbar(w, M.buildTopbarWidget())
+        UI.replaceTopbar(w, new_topbar)
         UIManager:setDirty(w, "ui")
     end
     refreshWidget(plugin.ui)
@@ -536,9 +555,6 @@ function M.refresh(plugin)
         local ok, err = pcall(refreshWidget, entry.widget)
         if not ok then logger.warn("simpleui: topbar refreshWidget failed:", tostring(err)) end
     end
-    -- Re-check suspended state before scheduling the next tick — the device
-    -- may have suspended during the refresh work above.
-    if plugin and plugin._simpleui_suspended then return end
     local delay = 60 - (os.time() % 60) + 1
     M.scheduleRefresh(plugin, delay)
 end

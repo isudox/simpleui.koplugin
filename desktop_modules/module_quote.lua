@@ -20,7 +20,9 @@ local FrameContainer = require("ui/widget/container/framecontainer")
 
 local GestureRange   = require("ui/gesturerange")
 
-local ConfirmBox     = require("ui/widget/confirmbox")
+-- ConfirmBox is only needed when the user taps a highlight to open its book.
+-- Lazy-loaded at that point to avoid the cost at module-load time.
+-- local ConfirmBox = require("ui/widget/confirmbox")  ← moved to usage site
 
 local InputContainer = require("ui/widget/container/inputcontainer")
 
@@ -939,13 +941,13 @@ function M.build(w, ctx)
         function tappable:onTapQuote()
 
             local fp    = self._fp
-            local title = self._title
             local pos0  = self._pos0
             local page  = self._page
             local open  = self._open
+            local BD        = require("ui/bidi")
+            local ConfirmBox = require("ui/widget/confirmbox")
             UIManager:show(ConfirmBox:new{
-                text    = string.format(_(
-                    "Open \"%s\" to see this highlight?"), title),
+                text        = _("Open this file?") .. "\n\n" .. BD.filename(fp:match("([^/]+)$")),
                 ok_text     = _("Open"),
                 cancel_text = _("Cancel"),
                 ok_callback = function()

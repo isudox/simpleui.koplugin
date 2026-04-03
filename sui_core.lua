@@ -12,6 +12,14 @@ local Device         = require("device")
 local Screen         = Device.screen
 local logger         = require("logger")
 
+-- Lazy references to sibling modules — resolved on first use to avoid
+-- circular-require issues at load time, but stored as upvalues so that
+-- the hot paths (getContentHeight, getContentTop, wrapWithNavbar,
+-- applyNavbarState) never pay a require() lookup after the first call.
+local _Bottombar, _Topbar
+local function _BB() _Bottombar = _Bottombar or require("sui_bottombar"); return _Bottombar end
+local function _TB() _Topbar    = _Topbar    or require("sui_topbar");    return _Topbar    end
+
 local M   = {}
 local _dim = {}
 
@@ -126,16 +134,13 @@ end
 -- ---------------------------------------------------------------------------
 
 function M.getContentHeight()
-    local Bottombar = require("sui_bottombar")
-    local Topbar    = require("sui_topbar")
     local topbar_on = G_reader_settings:nilOrTrue("navbar_topbar_enabled")
-    return Screen:getHeight() - Bottombar.TOTAL_H() - (topbar_on and Topbar.TOTAL_TOP_H() or 0)
+    return Screen:getHeight() - _BB().TOTAL_H() - (topbar_on and _TB().TOTAL_TOP_H() or 0)
 end
 
 function M.getContentTop()
-    local Topbar    = require("sui_topbar")
     local topbar_on = G_reader_settings:nilOrTrue("navbar_topbar_enabled")
-    return topbar_on and Topbar.TOTAL_TOP_H() or 0
+    return topbar_on and _TB().TOTAL_TOP_H() or 0
 end
 
 -- ---------------------------------------------------------------------------
@@ -170,8 +175,8 @@ end
 -- ---------------------------------------------------------------------------
 
 function M.wrapWithNavbar(inner_widget, active_action_id, tabs, force_no_arrows)
-    local Topbar    = require("sui_topbar")
-    local Bottombar = require("sui_bottombar")
+    local Topbar    = _TB()
+    local Bottombar = _BB()
     local screen_w  = Screen:getWidth()
     local screen_h  = Screen:getHeight()
     -- Read both settings once — used multiple times below.
@@ -247,7 +252,7 @@ end
 -- ---------------------------------------------------------------------------
 
 function M.applyNavbarState(widget, container, bar, topbar, bar_idx, topbar_on, topbar_idx, tabs)
-    local Topbar = require("sui_topbar")
+    local Topbar = _TB()
     widget._navbar_container         = container
     widget._navbar_bar               = bar
     widget._navbar_topbar            = topbar
@@ -360,7 +365,7 @@ function M.showSettingsMenu(title, item_table_fn, top_offset, screen_h, bottomba
                     item._sui_lazy_fn   = nil
                 end
                 self_menu.item_table.title = self_menu.title
-                table.insert(self_menu.item_table_stack, self_menu.item_table)
+                self_menu.item_table_stack[#self_menu.item_table_stack + 1] = self_menu.item_table
                 self_menu:switchItemTable(item.text, M.resolveMenuItems(item.sub_item_table))
             elseif item.callback then
                 local _suppress = false

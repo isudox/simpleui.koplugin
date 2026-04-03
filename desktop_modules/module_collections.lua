@@ -154,10 +154,11 @@ local function getBookCover(filepath, w, h)
     if not bb then return nil end
     local ok, img = pcall(function()
         return ImageWidget:new{
-            image        = bb,
-            width        = w,
-            height       = h,
-            scale_factor = 1,
+            image            = bb,
+            image_disposable = false,  -- bb is owned by the cover cache; must not be freed here
+            width            = w,
+            height           = h,
+            scale_factor     = 1,
         }
     end)
     return ok and img or nil

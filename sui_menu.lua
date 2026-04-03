@@ -289,77 +289,211 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
     -- -----------------------------------------------------------------------
 
     local function makePaginationBarMenu()
+        -- ── helpers ──────────────────────────────────────────────────────────
+        -- "Geral" state is encoded in two existing keys:
+        --   Predefinido : pagination_visible=true,  navpager=false
+        --   Navpager    : navpager=true             (pagination_visible ignored)
+        --   Oculto      : pagination_visible=false, navpager=false
+        local function getGeral()
+            if G_reader_settings:isTrue("navbar_navpager_enabled") then
+                return "navpager"
+            elseif G_reader_settings:nilOrTrue("navbar_pagination_visible") then
+                return "predefinido"
+            else
+                return "oculto"
+            end
+        end
+
+        local function setGeral(mode)
+            if mode == "navpager" then
+                G_reader_settings:saveSetting("navbar_navpager_enabled", true)
+                G_reader_settings:saveSetting("navbar_pagination_visible", false)
+                -- Navpager requires dot pager on homescreen (koreader style not allowed).
+                if not G_reader_settings:nilOrTrue("navbar_dotpager_always") then
+                    G_reader_settings:saveSetting("navbar_dotpager_always", true)
+                end
+                -- Trim tabs to navpager limit if needed.
+                local tabs = Config.loadTabConfig()
+                if #tabs > Config.MAX_TABS_NAVPAGER then
+                    while #tabs > Config.MAX_TABS_NAVPAGER do
+                        table.remove(tabs, #tabs)
+                    end
+                    Config.saveTabConfig(tabs)
+                end
+            elseif mode == "predefinido" then
+                G_reader_settings:saveSetting("navbar_navpager_enabled", false)
+                G_reader_settings:saveSetting("navbar_pagination_visible", true)
+            else -- "oculto"
+                G_reader_settings:saveSetting("navbar_navpager_enabled", false)
+                G_reader_settings:saveSetting("navbar_pagination_visible", false)
+            end
+        end
+
+        local function restartPrompt(text)
+            UIManager:show(ConfirmBox():new{
+                text        = text,
+                ok_text     = _("Restart"), cancel_text = _("Later"),
+                ok_callback = function()
+                    G_reader_settings:flush()
+                    UIManager:restartKOReader()
+                end,
+            })
+        end
+
+        -- ── menu ─────────────────────────────────────────────────────────────
         return {
-            -- ── Default (was "Pagination Bar On/Off") ──────────────────────
+            -- ── Subpasta: Geral ───────────────────────────────────────────────
             {
-                text_func    = function()
-                    local state = G_reader_settings:nilOrTrue("navbar_pagination_visible") and _("On") or _("Off")
-                    return _("Default") .. " — " .. state
-                end,
-                checked_func = function() return G_reader_settings:nilOrTrue("navbar_pagination_visible") end,
-                callback     = function()
-                    local on = G_reader_settings:nilOrTrue("navbar_pagination_visible")
-                    G_reader_settings:saveSetting("navbar_pagination_visible", not on)
-                    -- Mutual exclusion: enabling Default disables Navpager.
-                    if not on then
-                        G_reader_settings:saveSetting("navbar_navpager_enabled", false)
-                    end
-                    local state_text = on and _("hidden") or _("visible")
-                    UIManager:show(ConfirmBox():new{
-                        text = string.format(_("Pagination bar will be %s after restart.\n\nRestart now?"), state_text),
-                        ok_text = _("Restart"), cancel_text = _("Later"),
-                        ok_callback = function()
-                            G_reader_settings:flush()
-                            UIManager:restartKOReader()
+                text           = _("General"),
+                sub_item_table = {
+                    {
+                        text         = _("Default"),
+                        radio        = true,
+                        checked_func = function() return getGeral() == "predefinido" end,
+                        callback     = function()
+                            if getGeral() == "predefinido" then return end
+                            setGeral("predefinido")
+                            restartPrompt(_("Pagination bar set to Default.\n\nRestart now?"))
                         end,
-                    })
-                end,
+                    },
+                    {
+                        text         = _("Navpager"),
+                        radio        = true,
+                        checked_func = function() return getGeral() == "navpager" end,
+                        help_text    = _("Replaces the pagination bar with Prev/Next arrows at the edges of the bottom bar.\nThe arrows dim when there is no previous or next page.\nWith navpager active, as few as 1 tab and at most 4 tabs can be configured."),
+                        callback     = function()
+                            if getGeral() == "navpager" then return end
+                            setGeral("navpager")
+                            restartPrompt(_("Navpager enabled.\n\nRestart now?"))
+                        end,
+                    },
+                    {
+                        text         = _("Hidden"),
+                        radio        = true,
+                        checked_func = function() return getGeral() == "oculto" end,
+                        callback     = function()
+                            if getGeral() == "oculto" then return end
+                            setGeral("oculto")
+                            restartPrompt(_("Pagination bar hidden.\n\nRestart now?"))
+                        end,
+                    },
+                },
             },
-            -- ── Size (indented, only active when Default is on) ─────────────
+            -- ── Subpasta: Home Screen ─────────────────────────────────────────
             {
-                text           = _("    Size"),
-                enabled_func   = function() return G_reader_settings:nilOrTrue("navbar_pagination_visible") end,
-                sub_item_table = (function()
-                    local sizes = {
-                        { label = _("Extra Small"), key = "xs" },
-                        { label = _("Small"),       key = "s"  },
-                        { label = _("Default"),     key = "m"  },
-                    }
-                    local items = {}
-                    for _i, s in ipairs(sizes) do
-                        local key = s.key
-                        items[#items + 1] = {
-                            text         = s.label,
-                            checked_func = function()
-                                return (G_reader_settings:readSetting("navbar_pagination_size") or "s") == key
-                            end,
-                            callback     = function()
-                                G_reader_settings:saveSetting("navbar_pagination_size", key)
-                                UIManager:show(ConfirmBox():new{
-                                    text = _("Pagination bar size will change after restart.\n\nRestart now?"),
-                                    ok_text = _("Restart"), cancel_text = _("Later"),
-                                    ok_callback = function()
-                                        G_reader_settings:flush()
-                                        UIManager:restartKOReader()
-                                    end,
-                                })
-                            end,
-                        }
-                    end
-                    return items
-                end)(),
+                text           = _("Home Screen"),
+                sub_item_table = {
+                    {
+                        text         = _("Dot Pager"),
+                        radio        = true,
+                        checked_func = function()
+                            -- Dot Pager is always forced when Navpager is active.
+                            return not G_reader_settings:isTrue("navbar_homescreen_pagination_hidden")
+                                and (G_reader_settings:nilOrTrue("navbar_dotpager_always")
+                                    or getGeral() == "navpager")
+                        end,
+                        help_text    = _("Shows a row of dots at the bottom of the homescreen.\nThe active page dot is filled; the others are dimmed.\nAlways active when Navpager is selected."),
+                        callback     = function()
+                            G_reader_settings:saveSetting("navbar_homescreen_pagination_hidden", false)
+                            if not G_reader_settings:nilOrTrue("navbar_dotpager_always") then
+                                G_reader_settings:saveSetting("navbar_dotpager_always", true)
+                            end
+                            plugin:_scheduleRebuild()
+                            local ok_hs, HS = pcall(require, "sui_homescreen")
+                            if ok_hs and HS then HS.refresh(true) end
+                        end,
+                        keep_menu_open = true,
+                    },
+                    {
+                        text         = _("KOReader"),
+                        radio        = true,
+                        -- Not selectable when Navpager is active.
+                        enabled_func = function() return getGeral() ~= "navpager" end,
+                        checked_func = function()
+                            return not G_reader_settings:isTrue("navbar_homescreen_pagination_hidden")
+                                and not G_reader_settings:nilOrTrue("navbar_dotpager_always")
+                                and getGeral() ~= "navpager"
+                        end,
+                        help_text    = _("Uses the standard KOReader pagination bar on the homescreen.\nNot available when Navpager is active."),
+                        callback     = function()
+                            G_reader_settings:saveSetting("navbar_homescreen_pagination_hidden", false)
+                            if G_reader_settings:nilOrTrue("navbar_dotpager_always") then
+                                G_reader_settings:saveSetting("navbar_dotpager_always", false)
+                            end
+                            plugin:_scheduleRebuild()
+                            local ok_hs, HS = pcall(require, "sui_homescreen")
+                            if ok_hs and HS then HS.refresh(true) end
+                        end,
+                        keep_menu_open = true,
+                    },
+                    {
+                        text         = _("Hidden"),
+                        radio        = true,
+                        -- Not selectable when Navpager is active (navpager needs dot pager).
+                        enabled_func = function() return getGeral() ~= "navpager" end,
+                        checked_func = function()
+                            return G_reader_settings:isTrue("navbar_homescreen_pagination_hidden")
+                                and getGeral() ~= "navpager"
+                        end,
+                        help_text    = _("Hides the pagination bar on the homescreen.\nNot available when Navpager is active."),
+                        callback     = function()
+                            if G_reader_settings:isTrue("navbar_homescreen_pagination_hidden") then return end
+                            G_reader_settings:saveSetting("navbar_homescreen_pagination_hidden", true)
+                            local ok_hs, HS = pcall(require, "sui_homescreen")
+                            if ok_hs and HS then HS.refresh(true) end
+                        end,
+                        keep_menu_open = true,
+                    },
+                },
             },
-            -- ── Page number in title bar (disabled when navpager is on) ─────
+            -- ── Subpasta: Tamanho (só quando geral não é oculto) ──────────────
             {
-                text_func    = function()
-                    local on = G_reader_settings:isTrue("navbar_pagination_show_subtitle")
-                    return _("Page number in title bar") .. " — " .. (on and _("On") or _("Off"))
-                end,
+                text           = _("Size"),
+                enabled_func   = function() return getGeral() ~= "oculto" end,
+                sub_item_table = {
+                    {
+                        text           = _("Extra Small"),
+                        radio          = true,
+                        enabled_func   = function() return getGeral() ~= "oculto" end,
+                        checked_func   = function()
+                            return (G_reader_settings:readSetting("navbar_pagination_size") or "s") == "xs"
+                        end,
+                        callback       = function()
+                            G_reader_settings:saveSetting("navbar_pagination_size", "xs")
+                            restartPrompt(_("Pagination bar size will change after restart.\n\nRestart now?"))
+                        end,
+                    },
+                    {
+                        text           = _("Small"),
+                        radio          = true,
+                        enabled_func   = function() return getGeral() ~= "oculto" end,
+                        checked_func   = function()
+                            return (G_reader_settings:readSetting("navbar_pagination_size") or "s") == "s"
+                        end,
+                        callback       = function()
+                            G_reader_settings:saveSetting("navbar_pagination_size", "s")
+                            restartPrompt(_("Pagination bar size will change after restart.\n\nRestart now?"))
+                        end,
+                    },
+                    {
+                        text           = _("Default"),
+                        radio          = true,
+                        enabled_func   = function() return getGeral() ~= "oculto" end,
+                        checked_func   = function()
+                            return (G_reader_settings:readSetting("navbar_pagination_size") or "s") == "m"
+                        end,
+                        callback       = function()
+                            G_reader_settings:saveSetting("navbar_pagination_size", "m")
+                            restartPrompt(_("Pagination bar size will change after restart.\n\nRestart now?"))
+                        end,
+                    },
+                },
+            },
+            -- ── Número de páginas na barra de título ─────────────────────────
+            {
+                text         = _("Number of Pages in Title Bar Always"),
                 checked_func = function()
                     return G_reader_settings:isTrue("navbar_pagination_show_subtitle")
-                end,
-                enabled_func = function()
-                    return not Config.isNavpagerEnabled()
                 end,
                 help_text    = _("Shows \"Page X of Y\" in the title bar subtitle when browsing the library, history or collections.\nNavpager enables this automatically.\nNot available when Navpager is active."),
                 callback     = function()
@@ -367,43 +501,8 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                     G_reader_settings:saveSetting("navbar_pagination_show_subtitle", not on)
                     plugin:_scheduleRebuild()
                 end,
+                keep_menu_open = true,
             },
-            -- ── Navpager ────────────────────────────────────────────────────
-            {
-                text_func    = function()
-                    local state = G_reader_settings:isTrue("navbar_navpager_enabled") and _("On") or _("Off")
-                    return _("Navpager") .. " — " .. state
-                end,
-                checked_func = function() return G_reader_settings:isTrue("navbar_navpager_enabled") end,
-                help_text    = _("Replaces the pagination bar with Prev/Next arrows at the edges of the bottom bar.\nThe arrows dim when there is no previous or next page.\nWith navpager active, as few as 1 tab and at most 4 tabs can be configured."),
-                callback     = function()
-                    local on = G_reader_settings:isTrue("navbar_navpager_enabled")
-                    G_reader_settings:saveSetting("navbar_navpager_enabled", not on)
-                    -- When enabling navpager, hide the old pagination bar
-                    -- (the two features are mutually exclusive).
-                    if not on then
-                        G_reader_settings:saveSetting("navbar_pagination_visible", false)
-                        -- Trim tabs to navpager limit if needed.
-                        local tabs = Config.loadTabConfig()
-                        if #tabs > Config.MAX_TABS_NAVPAGER then
-                            while #tabs > Config.MAX_TABS_NAVPAGER do
-                                table.remove(tabs, #tabs)
-                            end
-                            Config.saveTabConfig(tabs)
-                        end
-                    end
-                    local state_text = on and _("disabled") or _("enabled")
-                    UIManager:show(ConfirmBox():new{
-                        text = string.format(_("Navpager will be %s after restart.\n\nRestart now?"), state_text),
-                        ok_text = _("Restart"), cancel_text = _("Later"),
-                        ok_callback = function()
-                            G_reader_settings:flush()
-                            UIManager:restartKOReader()
-                        end,
-                    })
-                end,
-            },
-
         }
     end
 
@@ -1175,18 +1274,6 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
     -- Builds the full "Modules" sub-menu for a given ctx.
     -- Fully registry-driven: no module ids hardcoded here.
     local function makeModulesMenu(ctx)
-        local MAX_MOD      = 3
-        local NO_LIMIT_KEY = "navbar_homescreen_no_module_limit"
-
-        local function isUnlimited()
-            return G_reader_settings:readSetting(NO_LIMIT_KEY) == true
-        end
-
-        local function maxMsg()
-            UIManager:show(InfoMessage():new{
-                text = string.format(_("Maximum %d modules active. Disable one first."), MAX_MOD), timeout = 2 })
-        end
-
         -- ctx_menu passed to each module's getMenuItems()
         -- InfoMessage and SortWidget are resolved lazily on first access via
         -- __index so that require("ui/widget/...") is deferred until the user
@@ -1227,19 +1314,12 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
             local _mod = mod
             return {
                 text_func = function()
-                    local base = _mod.name
-                    if isUnlimited() then return base end
-                    if Registry.isEnabled(_mod, ctx.pfx) then return base end
-                    local rem = MAX_MOD - countModules(ctx)
-                    if rem <= 0 then return base .. "  (0 left)" end
-                    if rem <= 2 then return base .. "  (" .. rem .. " left)" end
-                    return base
+                    return _mod.name
                 end,
                 checked_func   = function() return Registry.isEnabled(_mod, ctx.pfx) end,
                 keep_menu_open = true,
                 callback = function()
                     local on = Registry.isEnabled(_mod, ctx.pfx)
-                    if not on and not isUnlimited() and countModules(ctx) >= MAX_MOD then maxMsg(); return end
                     if type(_mod.setEnabled) == "function" then
                         _mod.setEnabled(ctx.pfx, not on)
                     elseif _mod.enabled_key then
@@ -1302,12 +1382,7 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
             {
                 text_func = function()
                     local n = countModules(ctx)
-                    if isUnlimited() then
-                        return string.format(_("Modules  (%d — no limit)"), n)
-                    end
-                    local rem = MAX_MOD - n
-                    if rem <= 0 then return string.format(_("Modules  (%d/%d — at limit)"), n, MAX_MOD) end
-                    return string.format(_("Modules  (%d/%d — %d left)"), n, MAX_MOD, rem)
+                    return string.format(_("Modules  (%d)"), n)
                 end,
                 sub_item_table_func = function()
                     local result = {
@@ -1348,22 +1423,6 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                         {
                             text = _("Module Settings"),
                             sub_item_table_func = makeModuleSettingsMenu,
-                        },
-                        {
-                            text = _("No Module Limit  ⚠ not recommended"),
-                            checked_func = function() return isUnlimited() end,
-                            keep_menu_open = true,
-                            callback = function()
-                                local on = isUnlimited()
-                                G_reader_settings:saveSetting(NO_LIMIT_KEY, not on)
-                                if not on then
-                                    UIManager:show(InfoMessage():new{
-                                        text = _("Module limit disabled. Enabling too many modules may slow down the homescreen significantly and modules may be clipped at the bottom of the page."),
-                                        timeout = 4,
-                                    })
-                                end
-                                ctx.refresh()
-                            end,
                         },
                         {
                             text_func = function() return _("Scale") end,
@@ -1498,6 +1557,37 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                 callback = function()
                     local on = G_reader_settings:readSetting("start_with", "filemanager") == "homescreen_simpleui"
                     G_reader_settings:saveSetting("start_with", on and "filemanager" or "homescreen_simpleui")
+                end,
+                separator = true,
+            },
+            {
+                text_func = function()
+                    local n = G_reader_settings:readSetting("navbar_homescreen_mods_per_page") or 3
+                    return string.format(_("Modules per Page  (%d)"), n)
+                end,
+                keep_menu_open = true,
+                callback = function()
+                    local SpinWidget = require("ui/widget/spinwidget")
+                    UIManager:show(SpinWidget:new{
+                        title_text    = _("Modules per Page"),
+                        info_text     = _("Maximum number of modules shown on each page.\nSwipe left/right on the Home Screen to turn pages."),
+                        value         = G_reader_settings:readSetting("navbar_homescreen_mods_per_page") or 3,
+                        value_min     = 1,
+                        value_max     = 10,
+                        value_step    = 1,
+                        ok_text       = _("Apply"),
+                        cancel_text   = _("Cancel"),
+                        default_value = 3,
+                        callback = function(spin)
+                            G_reader_settings:saveSetting("navbar_homescreen_mods_per_page", spin.value)
+                            -- Reset to page 1 when the limit changes to avoid landing
+                            -- on a now-nonexistent page.
+                            local HS = package.loaded["sui_homescreen"]
+                            if HS then HS._current_page = 1 end
+                            if HS and HS._instance then HS._instance._current_page = 1 end
+                            ctx.refresh()
+                        end,
+                    })
                 end,
                 separator = true,
             },
@@ -1741,35 +1831,25 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                                         callback       = function() FC.setHideUnderline(not FC.getHideUnderline()); _refreshFC() end,
                                     },
                                     {
-                                        text           = _("Placeholder Cover for Folders"),
+                                        text           = _("Placeholder cover for bookless folders"),
                                         checked_func   = function() return FC.getSubfolderCover() end,
                                         enabled_func   = function() return FC.isEnabled() end,
                                         keep_menu_open = true,
-                                        hold_callback  = function()
-                                            local InfoMessage = require("ui/widget/infomessage")
-                                            local UIManager   = require("ui/uimanager")
-                                            UIManager:show(InfoMessage:new{
-                                                text = _("When enabled, folders that contain only subfolders (or are empty) display a placeholder cover with a folder icon. If \"Number of Books in Folder\" is active, the badge shows the number of subfolders instead."),
-                                            })
-                                        end,
                                         callback       = function()
                                             FC.setSubfolderCover(not FC.getSubfolderCover())
+                                            -- Disable recursive search when the parent option is turned off.
+                                            if not FC.getSubfolderCover() then
+                                                FC.setRecursiveCover(false)
+                                            end
                                             FC.invalidateCache()
                                             _refreshFC()
                                         end,
                                     },
                                     {
-                                        text           = _("Use Cover from Subfolders"),
+                                        text           = _("  Scan subfolders for cover"),
                                         checked_func   = function() return FC.getRecursiveCover() end,
                                         enabled_func   = function() return FC.isEnabled() and FC.getSubfolderCover() end,
                                         keep_menu_open = true,
-                                        hold_callback  = function()
-                                            local InfoMessage = require("ui/widget/infomessage")
-                                            local UIManager   = require("ui/uimanager")
-                                            UIManager:show(InfoMessage:new{
-                                                text = _("When enabled, folders with no direct ebooks display the first available cover found by scanning subfolders recursively (up to 3 levels deep). Falls back to the placeholder cover if no cover is found."),
-                                            })
-                                        end,
                                         callback       = function()
                                             FC.setRecursiveCover(not FC.getRecursiveCover())
                                             FC.invalidateCache()

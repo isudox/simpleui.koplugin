@@ -27,10 +27,13 @@ local CLR_TEXT_SUB = UI.CLR_TEXT_SUB
 -- We use os.date("*t") for the numeric indices and look up translated names.
 -- ---------------------------------------------------------------------------
 
--- _WEEKDAYS and _MONTHS are intentionally built inside _localDate so that
--- _() is called at render time, after the user's locale has been loaded.
--- Building them at module-load time (file level) would freeze them to the
--- default locale because require() runs before KOReader applies translations.
+-- _WEEKDAYS and _MONTHS are intentionally NOT built at module-load time so
+-- that _() is called after the user's locale has been applied. They are built
+-- on the first _localDate() call and reused from that point on — the locale
+-- never changes within a running KOReader session, so caching is safe.
+local _weekdays = nil
+local _months   = nil
+
 local function _localDate()
     -- Pass os.time() explicitly: os.date("*t") without argument can return
     -- nil in LuaJIT on some platforms (macOS emulator) when timezone handling
@@ -41,17 +44,20 @@ local function _localDate()
         -- Fallback via the datetime module's locale-aware formatter.
         return datetime.secondsToDate(now, true)
     end
-    local weekdays = {
-        _("Sunday"), _("Monday"), _("Tuesday"), _("Wednesday"),
-        _("Thursday"), _("Friday"), _("Saturday"),
-    }
-    local months = {
-        _("January"), _("February"), _("March"),     _("April"),
-        _("May"),     _("June"),     _("July"),       _("August"),
-        _("September"), _("October"), _("November"),  _("December"),
-    }
-    local weekday = weekdays[t.wday] or os.date("%A", now)
-    local month   = months[t.month]  or os.date("%B", now)
+    -- Build translation tables on first call only; never recreated afterwards.
+    if not _weekdays then
+        _weekdays = {
+            _("Sunday"), _("Monday"), _("Tuesday"), _("Wednesday"),
+            _("Thursday"), _("Friday"), _("Saturday"),
+        }
+        _months = {
+            _("January"), _("February"), _("March"),     _("April"),
+            _("May"),     _("June"),     _("July"),       _("August"),
+            _("September"), _("October"), _("November"),  _("December"),
+        }
+    end
+    local weekday = _weekdays[t.wday] or os.date("%A", now)
+    local month   = _months[t.month]  or os.date("%B", now)
     return string.format("%s, %d %s", weekday, t.mday, month)
 end
 
@@ -253,7 +259,10 @@ local function _tick()
     -- that keeps firing throughout the entire suspend period.
     -- HomescreenWidget:onResume calls ClockMod.scheduleRefresh() to restart the
     -- chain on wakeup — no action needed here.
-    if hs._simpleui_suspended or hs._suspended then
+    -- NOTE: hs._suspended is set by HomescreenWidget:onSuspend(). The field
+    -- _simpleui_suspended lives on the SimpleUIPlugin, not on the widget —
+    -- checking it here was a dead guard (always nil on hs).
+    if hs._suspended then
         return
     end
 
@@ -290,9 +299,48 @@ local function _tick()
     end
 
     if not swapped then
-        -- Slow-path fallback: trigger a full homescreen refresh.
-        local ok = pcall(function() hs:_refresh(false) end)
-        if not ok then _hs_widget = nil; return end
+        -- Slow-path fallback — only triggered when the clock module is on the
+        -- current page but build() failed (e.g. transient font-cache miss).
+        -- idx == nil means clock is simply not on the current page: nothing to
+        -- repaint, so skip the rebuild entirely.
+        -- Use _updatePage(true) directly — same as the original _clockTick:
+        -- immediate, keeps book/stats caches intact, no unnecessary DB roundtrips.
+        if idx ~= nil and hs._navbar_container then
+            local ok = pcall(function()
+                hs:_updatePage(true)
+                UIManager:setDirty(hs._navbar_container, "ui")
+            end)
+            if not ok then _hs_widget = nil; return end
+        end
+    end
+
+    -- ---------------------------------------------------------------------------
+    -- Topbar clock synchronisation.
+    -- Both clocks use the formula 60-(os.time()%60)+1 to schedule their next tick.
+    -- If they start from different moments (e.g. topbar restarted by a frontlight
+    -- event mid-minute) they phase-drift and show different minutes.
+    --
+    -- Fix: drive the topbar refresh from this same callback, so both clocks read
+    -- os.time() at the same moment and calculate the same next-tick delay.
+    -- After this call, both chains reschedule to the identical next boundary.
+    --
+    -- Access the plugin via FM.instance._simpleui_plugin — the same pattern used
+    -- in sui_bottombar.lua. Guard against topbar being disabled or FM not yet ready.
+    -- ---------------------------------------------------------------------------
+    local FM = package.loaded["apps/filemanager/filemanager"]
+    local plugin = FM and FM.instance and FM.instance._simpleui_plugin
+    if plugin and not plugin._simpleui_suspended then
+        local Topbar = package.loaded["sui_topbar"]
+        if Topbar then
+            -- Cancel the topbar's own pending timer before refreshing — without
+            -- this, the topbar would fire again on its old schedule in addition
+            -- to the reschedule at the end of Topbar.refresh().
+            if plugin._topbar_timer then
+                UIManager:unschedule(plugin._topbar_timer)
+                plugin._topbar_timer = nil
+            end
+            pcall(Topbar.refresh, Topbar, plugin)
+        end
     end
 
     M.scheduleRefresh(hs)

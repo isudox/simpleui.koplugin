@@ -18,7 +18,6 @@ local UIManager       = require("ui/uimanager")
 local VerticalGroup   = require("ui/widget/verticalgroup")
 local Screen          = Device.screen
 local _               = require("gettext")
-local logger          = require("logger")
 local Config          = require("sui_config")
 
 local UI      = require("sui_core")
@@ -65,8 +64,8 @@ local STAT_MAP = {
     avg_pages   = { display_label = _("Daily avg — Pages"), value = function(s) return tostring(s.avg_pages) end,   label = _("pages/day (7 days)") },
     total_time  = { display_label = _("All time — Time"),   value = function(s) return fmtTime(s.total_secs) end,   label = _("of reading, all time") },
     total_books = { display_label = _("All time — Books"),  value = function(s) return tostring(s.total_books) end, label = _("books finished") },
-    streak      = { display_label = _("Streak"),            value = function(s) return tostring(s.streak) end,
-                    label_fn = function(s) return s.streak == 1 and _("day streak") or _("days streak") end },
+    streak      = { display_label = _("Streak"),            value = function(s) return s.streak > 0 and tostring(s.streak) or "—" end,
+                    label_fn = function(s) return s.streak == 1 and _("day streak") or (s.streak == 0 and _("no streak") or _("days streak")) end },
 }
 
 local STAT_POOL = { "today_time","today_pages","avg_time","avg_pages","total_time","total_books","streak" }
@@ -80,119 +79,35 @@ end
 table.sort(_sorted_pool, function(a, b) return a.label:lower() < b.label:lower() end)
 
 -- ---------------------------------------------------------------------------
--- Sidecar status helpers
--- ---------------------------------------------------------------------------
--- DB fetch
--- ---------------------------------------------------------------------------
-local _stats_cache     = nil
-local _stats_cache_day = nil
-
--- shared_conn is optional. When provided (from ctx.db_conn in homescreen),
--- the connection is used directly and NOT closed here — the caller owns it.
--- When nil, a private connection is opened and closed within this function.
-local function fetchAllStats(shared_conn)
-    local r = { today_secs=0,today_pages=0,avg_secs=0,avg_pages=0,total_secs=0,total_books=0,streak=0 }
-    local conn     = shared_conn or Config.openStatsDB()
-    local own_conn = not shared_conn
-    if not conn then return r end
-    local ok, err = pcall(function()
-        local t           = os.date("*t")
-        local start_today = os.time() - (t.hour*3600 + t.min*60 + t.sec)
-        local week_start  = start_today - 6*86400
-
-        r.today_secs = tonumber(conn:rowexec(string.format(
-            "SELECT sum(s) FROM (SELECT sum(duration) AS s FROM page_stat_data WHERE start_time>=%d GROUP BY id_book,page);",
-            start_today))) or 0
-
-        -- Use '@' as separator — avoids the integer ambiguity of '-'
-        -- (page=10, id_book=1 vs page=1, id_book=01 both collapse to "10-1").
-        r.today_pages = tonumber(conn:rowexec(string.format(
-            "SELECT count(DISTINCT page||'@'||id_book) FROM page_stat_data WHERE start_time>=%d AND duration>0;",
-            start_today))) or 0
-
-        -- Aggregate per-day first (inner GROUP BY dates), then average across days
-        -- in a single outer aggregate — no outer GROUP BY.
-        -- Previous version had `GROUP BY dates` on the outer query which produced
-        -- one row per day; count(DISTINCT dates) was always 1 per group and the
-        -- inner GROUP BY id_book,page,dates inflated page counts for books read
-        -- across multiple days.
-        local rw = conn:exec(string.format([[
-            SELECT count(*) AS nd, sum(sd) AS tt, sum(pg) AS tp
-            FROM (SELECT strftime('%%Y-%%m-%%d',start_time,'unixepoch','localtime') AS dates,
-                         sum(duration) AS sd,
-                         count(DISTINCT page||'@'||id_book) AS pg
-                  FROM page_stat_data WHERE start_time>=%d AND duration>0
-                  GROUP BY dates);]], week_start))
-        if rw and rw[1] and rw[1][1] then
-            local nd = tonumber(rw[1][1]) or 0
-            local tt = tonumber(rw[2] and rw[2][1]) or 0
-            local tp = tonumber(rw[3] and rw[3][1]) or 0
-            if nd > 0 then r.avg_secs=math.floor(tt/nd); r.avg_pages=math.floor(tp/nd) end
-        end
-
-        r.total_secs  = tonumber(conn:rowexec("SELECT sum(duration) FROM page_stat_data;")) or 0
-
-        -- Streak query rewritten to avoid LIMIT inside a CTE — not supported by
-        -- the SQLite version bundled in older KOReader builds.
-        -- Strategy: use a non-recursive CTE for the distinct dates, then a
-        -- recursive CTE that walks backwards one day at a time and stops when
-        -- there is no matching date row (WHERE clause instead of LIMIT).
-        -- The outer SELECT checks that the most recent reading day is today or
-        -- yesterday before returning the count; otherwise streak = 0.
-        local streak_val = conn:rowexec(string.format([[
-            WITH RECURSIVE
-            dated(d) AS (
-                SELECT DISTINCT date(start_time,'unixepoch','localtime')
-                FROM page_stat_data),
-            streak(d,n) AS (
-                SELECT d, 1 FROM dated
-                WHERE d = (SELECT max(d) FROM dated)
-                UNION ALL
-                SELECT date(streak.d,'-1 day'), streak.n+1
-                FROM streak
-                WHERE EXISTS (SELECT 1 FROM dated WHERE d = date(streak.d,'-1 day')))
-            SELECT CASE
-                WHEN (SELECT max(d) FROM dated) >= date(%d,'unixepoch','localtime','-1 day')
-                THEN COALESCE((SELECT max(n) FROM streak), 0)
-                ELSE 0 END;]], start_today))
-        r.streak = tonumber(streak_val) or 0
-    end)
-    if not ok then logger.warn("simpleui: reading_stats: fetchAllStats failed: " .. tostring(err))
-        if shared_conn and Config.isFatalDbError(err) then
-            r._db_conn_fatal = true
-        end
-    end
-    if own_conn then pcall(function() conn:close() end) end
-
-    -- Count finished books via sidecar status — uses the shared DocSettings
-    -- implementation (all-time, no year filter).
-    local SH = require("desktop_modules/module_books_shared")
-    r.total_books = SH.countMarkedRead()
-
-    return r
-end
-
--- shared_conn is optional. Only used when the cache is cold (first render of
--- the day). On cache hits the connection is never touched.
--- Pass force=true to bypass the date-based cache — used after returning from
--- a reading session so today's stats reflect the just-completed session.
-local function getStats(shared_conn, force)
-    local today_s = os.date("%Y-%m-%d")
-    if not force and _stats_cache_day == today_s and _stats_cache ~= nil then
-        return _stats_cache
-    end
-    local result     = fetchAllStats(shared_conn)
-    _stats_cache     = result
-    _stats_cache_day = today_s
-    return result
-end
-
--- ---------------------------------------------------------------------------
 -- Stat widget builders
 -- ---------------------------------------------------------------------------
 
 -- Cards mode: rounded border, content centred inside the card.
 -- `d` is the scaled-dims table produced once per M.build() call.
+-- Streak value widget: icon (dark grey) + space + number (black), side by side.
+-- To change icon colour: edit _STREAK_ICON_CLR.
+-- To change spacing:     edit _STREAK_ICON_GAP.
+local _STREAK_ICON     = ""            -- U+F490 Nerd Fonts flame
+local _STREAK_ICON_CLR = Blitbuffer.gray(0.80)  -- dark grey; 0=black, 1=white
+local _STREAK_ICON_GAP = 6                   -- pixels between icon and number
+
+local function makeStreakValWidget(val_str, d)
+    return HorizontalGroup:new{ align = "center",
+        TextWidget:new{
+            text    = _STREAK_ICON,
+            face    = d.face_val,
+            fgcolor = _STREAK_ICON_CLR,
+        },
+        HorizontalSpan:new{ width = _STREAK_ICON_GAP },
+        TextWidget:new{
+            text    = val_str,
+            face    = d.face_val,
+            bold    = true,
+            fgcolor = _CLR_TEXT_BLK,
+        },
+    }
+end
+
 local function buildStatCardWidget(card_w, stat_id, stats, d)
     local entry = STAT_MAP[stat_id]
     if not entry then return nil end
@@ -208,12 +123,9 @@ local function buildStatCardWidget(card_w, stat_id, stats, d)
         CenterContainer:new{
             dimen = Geom:new{ w = card_w, h = d.card_h },
             VerticalGroup:new{ align = "center",
-                TextWidget:new{
-                    text    = val_str,
-                    face    = d.face_val,
-                    bold    = true,
-                    fgcolor = _CLR_TEXT_BLK,
-                },
+                stat_id == "streak" and stats.streak >= 5
+                    and makeStreakValWidget(val_str, d)
+                    or  TextWidget:new{ text = val_str, face = d.face_val, bold = true, fgcolor = _CLR_TEXT_BLK },
                 TextWidget:new{
                     text    = lbl_str,
                     face    = d.face_lbl,
@@ -240,12 +152,9 @@ local function buildStatFlatWidget(card_w, stat_id, stats, d)
         CenterContainer:new{
             dimen = Geom:new{ w = card_w, h = d.card_h },
             VerticalGroup:new{ align = "center",
-                TextWidget:new{
-                    text    = val_str,
-                    face    = d.face_val,
-                    bold    = true,
-                    fgcolor = _CLR_TEXT_BLK,
-                },
+                stat_id == "streak" and stats.streak >= 5
+                    and makeStreakValWidget(val_str, d)
+                    or  TextWidget:new{ text = val_str, face = d.face_val, bold = true, fgcolor = _CLR_TEXT_BLK },
                 TextWidget:new{
                     text    = lbl_str,
                     face    = d.face_lbl,
@@ -269,12 +178,9 @@ local function buildStatListCell(cell_w, stat_id, stats, show_sep, d)
         CenterContainer:new{
             dimen = Geom:new{ w = cell_w, h = d.card_h },
             VerticalGroup:new{ align = "left",
-                TextWidget:new{
-                    text    = val_str,
-                    face    = d.face_val,
-                    bold    = true,
-                    fgcolor = _CLR_TEXT_BLK,
-                },
+                stat_id == "streak" and stats.streak >= 5
+                    and makeStreakValWidget(val_str, d)
+                    or  TextWidget:new{ text = val_str, face = d.face_val, bold = true, fgcolor = _CLR_TEXT_BLK },
                 TextWidget:new{
                     text    = lbl_str,
                     face    = d.face_lbl,
@@ -342,8 +248,9 @@ end
 M.STAT_POOL = STAT_POOL
 
 function M.invalidateCache()
-    _stats_cache     = nil
-    _stats_cache_day = nil  -- force re-fetch even within the same day
+    -- Delegate to the shared provider — it owns the cache now.
+    local SP = package.loaded["desktop_modules/module_stats_provider"]
+    if SP then SP.invalidate() end
 end
 
 function M.build(w, ctx)
@@ -384,10 +291,21 @@ function M.build(w, ctx)
         }
     end
 
-    local n      = math.min(#stat_ids, RS_N_COLS)
-    local stats  = getStats(ctx.db_conn)
-    if stats._db_conn_fatal and ctx then ctx.db_conn_fatal = true end
-    local mode   = getType(ctx.pfx)
+    local n    = math.min(#stat_ids, RS_N_COLS)
+    -- Stats are pre-fetched by StatsProvider (via _buildCtx) and passed in
+    -- ctx.stats — no DB access or cache logic here.
+    local sp   = ctx.stats or {}
+    local stats = {
+        today_secs  = sp.today_secs  or 0,
+        today_pages = sp.today_pages or 0,
+        avg_secs    = sp.avg_secs    or 0,
+        avg_pages   = sp.avg_pages   or 0,
+        total_secs  = sp.total_secs  or 0,
+        total_books = sp.books_total or 0,
+        streak      = sp.streak      or 0,
+    }
+    if sp.db_conn_fatal and ctx then ctx.db_conn_fatal = true end
+    local mode  = getType(ctx.pfx)
     local row    = HorizontalGroup:new{ align = "center" }
 
     if mode == "list" then
@@ -397,22 +315,25 @@ function M.build(w, ctx)
                       or OverlapGroup:new{
                              dimen = Geom:new{ w = cell_w, h = d.card_h },
                          }
-            local tappable = InputContainer:new{
-                dimen = Geom:new{ w = cell_w, h = d.card_h },
-                [1]   = cell,
-            }
-            tappable.ges_events = {
-                TapStatCard = { GestureRange:new{ ges = "tap", range = function() return tappable.dimen end } },
-            }
-            function tappable:onTapStatCard() openReaderProgress(); return true end
-            row[#row+1] = tappable
+            row[#row+1] = cell
         end
 
-        return FrameContainer:new{
+        -- Single tappable over the whole row — all cards open the same screen,
+        -- so one InputContainer + one GestureRange + one handler replaces N of each.
+        local frame = FrameContainer:new{
             dimen      = Geom:new{ w = w, h = d.card_h },
             bordersize = 0, padding = 0,
             row,
         }
+        local tappable = InputContainer:new{
+            dimen = Geom:new{ w = w, h = d.card_h },
+            [1]   = frame,
+        }
+        tappable.ges_events = {
+            TapStatCard = { GestureRange:new{ ges = "tap", range = function() return tappable.dimen end } },
+        }
+        function tappable:onTapStatCard() openReaderProgress(); return true end
+        return tappable
     else
         -- Cards / Flat mode: rounded cards with gaps between them.
         -- "flat" = no border, tinted background; "cards" = bordered white.
@@ -429,26 +350,29 @@ function M.build(w, ctx)
                 dimen = Geom:new{ w = card_w, h = d.card_h },
                 bordersize = 0, padding = 0,
             }
-            local tappable = InputContainer:new{
-                dimen = Geom:new{ w = card_w, h = d.card_h },
-                [1]   = card,
-            }
-            tappable.ges_events = {
-                TapStatCard = { GestureRange:new{ ges = "tap", range = function() return tappable.dimen end } },
-            }
-            function tappable:onTapStatCard() openReaderProgress(); return true end
             if i > 1 then row[#row+1] = HorizontalSpan:new{ width = d.gap } end
-            row[#row+1] = tappable
+            row[#row+1] = card
         end
 
-        return FrameContainer:new{
-            dimen      = Geom:new{ w = w, h = d.card_h },
-            bordersize = 0, padding = 0,
-            CenterContainer:new{
-                dimen = Geom:new{ w = w, h = d.card_h },
-                row,
+        -- Single tappable over the whole row — one InputContainer + one
+        -- GestureRange + one handler replaces N of each (N ≤ RS_N_COLS = 3).
+        local inner = CenterContainer:new{
+            dimen = Geom:new{ w = w, h = d.card_h },
+            row,
+        }
+        local tappable = InputContainer:new{
+            dimen = Geom:new{ w = w, h = d.card_h },
+            [1]   = FrameContainer:new{
+                dimen      = Geom:new{ w = w, h = d.card_h },
+                bordersize = 0, padding = 0,
+                inner,
             },
         }
+        tappable.ges_events = {
+            TapStatCard = { GestureRange:new{ ges = "tap", range = function() return tappable.dimen end } },
+        }
+        function tappable:onTapStatCard() openReaderProgress(); return true end
+        return tappable
     end
 end
 

@@ -253,7 +253,7 @@ function M.getMenuItems(ctx_menu)
         set       = function(v) Config.setItemLabelScale(v, "new_books", ctx_menu.pfx) end,
         refresh   = ctx_menu.refresh,
     })
-    return { Config.makeLabelToggleItem("new_books", _("New Books"), ctx_menu.refresh, ctx_menu._), _makeScaleItem(ctx_menu), label_item, _makeThumbScaleItem(ctx_menu) }
+    return { _makeScaleItem(ctx_menu), label_item, Config.makeLabelToggleItem("new_books", _("New Books"), ctx_menu.refresh, _lc), _makeThumbScaleItem(ctx_menu) }
 end
 
 return M
